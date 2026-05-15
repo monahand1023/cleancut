@@ -106,9 +106,9 @@ def _get_subtitles_and_words(
     )
     audio_path = extract_audio_to_wav(opts.video, track.index)
 
-    from cleancut.transcribe import _autodetect_device, transcribe
+    from cleancut.transcribe import _resolve_device, transcribe
 
-    device = config.whisper_device or _autodetect_device()
+    device = _resolve_device(config.whisper_device, config.whisper_word_timestamps)
     console.print(
         f"[cyan]Transcribing with Whisper[/cyan] model={config.whisper_model} "
         f"device={device} word_timestamps={config.whisper_word_timestamps}"

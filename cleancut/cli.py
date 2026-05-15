@@ -16,6 +16,7 @@ from cleancut.probe import (
     probe_streams,
     subtitle_streams,
 )
+from cleancut.report import build_plan, build_results_report, write_report
 
 console = Console()
 
@@ -140,6 +141,17 @@ def cmd_scan(args) -> int:
     edl.to_json(opts.edl_out)
     console.print(f"[green]Wrote EDL[/green] {opts.edl_out}")
     console.print(f"[bold]Summary[/bold]: {edl.summary()}")
+
+    # Always write a human-readable report next to the EDL.
+    from cleancut.editor import probe_duration
+    try:
+        duration = probe_duration(opts.video)
+    except Exception:
+        duration = None
+    report = build_results_report(opts.video, None, edl, original_duration=duration)
+    report_path = opts.edl_out.with_suffix(".report.txt")
+    write_report(report, report_path)
+    console.print(f"[green]Wrote report[/green] {report_path}")
     return 0
 
 
@@ -162,6 +174,26 @@ def cmd_clean(args) -> int:
     )
     out = run_full(opts, config)
     console.print(f"[green bold]Wrote[/green bold] {out}")
+
+    # After clean, write the results report next to the output video.
+    # We re-read the EDL that run_full just wrote (if available), otherwise rebuild.
+    from cleancut.editor import probe_duration
+    edl_for_report: EditDecisionList | None = None
+    if opts.edl_out and Path(opts.edl_out).exists():
+        edl_for_report = EditDecisionList.from_json(Path(opts.edl_out))
+    elif opts.edl_in and Path(opts.edl_in).exists():
+        edl_for_report = EditDecisionList.from_json(Path(opts.edl_in))
+    if edl_for_report is None:
+        # Render didn't persist an EDL — fall back to rebuilding.
+        edl_for_report, _ = build_edl(opts, config)
+    try:
+        duration = probe_duration(opts.video)
+    except Exception:
+        duration = None
+    report = build_results_report(opts.video, opts.output, edl_for_report, original_duration=duration)
+    report_path = opts.output.with_suffix(".report.txt")
+    write_report(report, report_path)
+    console.print(f"[green]Wrote report[/green] {report_path}")
     return 0
 
 
@@ -170,6 +202,9 @@ def cmd_inspect(args) -> int:
     if not video.exists():
         console.print(f"[red]Not found:[/red] {video}")
         return 1
+    config = Config.load_defaults()
+    _apply_common(args, config)
+
     streams = probe_streams(video)
     console.print(f"[bold]File:[/bold] {video}")
 
@@ -192,10 +227,28 @@ def cmd_inspect(args) -> int:
     console.print("\n[bold cyan]Sidecar .srt files[/bold cyan]")
     if sidecar:
         console.print(f"  → chosen: {sidecar}")
-    # Show every candidate for transparency.
     for p in sorted(video.parent.glob("*.srt")):
         marker = " ✓" if p == sidecar else ""
         console.print(f"  {p.name}{marker}")
+
+    # The plan — "what would happen if I ran clean now"
+    console.print()
+    plan = build_plan(
+        video=video,
+        streams=streams,
+        config=config,
+        audio_track=args.audio_track,
+        prefer_language=args.prefer_language,
+        use_visual=not args.no_visual,
+        use_scenes=not args.no_scenes,
+        use_whisper=not args.no_whisper,
+        burn_subs=not args.no_burn_subs,
+        explicit_subs=Path(args.subs) if args.subs else None,
+    )
+    console.print(plan)
+    if args.report_out:
+        write_report(plan, Path(args.report_out))
+        console.print(f"\n[green]Wrote plan[/green] {args.report_out}")
     return 0
 
 
@@ -219,9 +272,11 @@ def main(argv: list[str] | None = None) -> int:
     _add_common(p_clean)
     p_clean.set_defaults(func=cmd_clean)
 
-    p_inspect = sub.add_parser("inspect", help="Show audio tracks, subtitle tracks, and sidecar .srt files.")
+    p_inspect = sub.add_parser("inspect", help="Show tracks + a plan of what cleancut would change.")
     p_inspect.add_argument("video", help="Input video.")
-    p_inspect.add_argument("--prefer-language", default="eng", help="Language to prefer when picking the best track.")
+    p_inspect.add_argument("--subs", help="External .srt file (overrides discovery).")
+    p_inspect.add_argument("--report-out", help="Write the plan to this text file.")
+    _add_common(p_inspect)
     p_inspect.set_defaults(func=cmd_inspect)
 
     args = parser.parse_args(argv)

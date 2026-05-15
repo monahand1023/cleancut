@@ -21,12 +21,19 @@ class Word:
     probability: float = 1.0
 
 
-def _autodetect_device() -> str:
-    """Prefer MPS (Apple Silicon GPU) when available, else CUDA, else CPU."""
+def _autodetect_device(word_timestamps: bool = False) -> str:
+    """Prefer MPS (Apple Silicon GPU) when available, else CUDA, else CPU.
+
+    Important caveat: Whisper's word-timestamp DTW alignment uses float64 ops
+    that MPS doesn't support, and PYTORCH_ENABLE_MPS_FALLBACK does not cover
+    those in-place dtype conversions. When word timestamps are requested we
+    fall back to CPU automatically so the run actually completes.
+    """
     try:
         import torch  # type: ignore
         if torch.backends.mps.is_available():
-            # Some Whisper kernels are missing from MPS — let them fall back to CPU.
+            if word_timestamps:
+                return "cpu"
             os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
             return "mps"
         if torch.cuda.is_available():
@@ -34,6 +41,20 @@ def _autodetect_device() -> str:
     except ImportError:
         pass
     return "cpu"
+
+
+def _resolve_device(requested: str | None, word_timestamps: bool) -> str:
+    """Resolve the actual device to use, with a notice if we override."""
+    if requested is None:
+        return _autodetect_device(word_timestamps=word_timestamps)
+    if requested == "mps" and word_timestamps:
+        print(
+            "[cleancut] WARNING: MPS does not support Whisper's word-timestamp "
+            "float64 ops — falling back to CPU. Disable word timestamps with "
+            "--no-word-timestamps to use MPS."
+        )
+        return "cpu"
+    return requested
 
 
 def transcribe(
