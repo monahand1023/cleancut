@@ -42,24 +42,69 @@ class PipelineOptions:
     use_scenes: bool = True
     burn_subs: bool = True
     work_dir: Path | None = None
+    # 0-indexed audio track ordinal (audio:0, audio:1, …); None = auto (prefer English).
+    audio_track: int | None = None
+    # ISO language code to prefer for both sidecar .srt and audio track ("eng", "spa", …).
+    prefer_language: str = "eng"
 
 
 def _get_subtitles_and_words(
     opts: PipelineOptions, config: Config
 ) -> tuple[list[Subtitle], list]:
-    """Read .srt if provided, else look beside the video, else transcribe with Whisper."""
+    """Resolve subtitles in this priority:
+
+    1. Explicit --subs path.
+    2. Best sidecar .srt found beside the video (Plex naming, language-aware).
+    3. Best embedded *text* subtitle track in the container.
+    4. Whisper transcription of the preferred-language audio track.
+    """
+    from cleancut.probe import (
+        extract_audio_to_wav,
+        extract_text_subtitle,
+        find_sidecar_subtitle,
+        pick_audio_track,
+        pick_embedded_subtitle,
+        probe_streams,
+    )
+
     if opts.subs and opts.subs.exists():
         console.print(f"[cyan]Reading subtitles[/cyan] {opts.subs}")
         return read_srt(opts.subs), []
 
-    sibling = opts.video.with_suffix(".srt")
-    if sibling.exists():
-        console.print(f"[cyan]Found sibling .srt[/cyan] {sibling}")
-        return read_srt(sibling), []
+    sidecar = find_sidecar_subtitle(opts.video, prefer_language=opts.prefer_language)
+    if sidecar:
+        console.print(f"[cyan]Found sidecar .srt[/cyan] {sidecar}")
+        return read_srt(sidecar), []
+
+    streams = probe_streams(opts.video)
+    embedded = pick_embedded_subtitle(streams, prefer_language=opts.prefer_language)
+    if embedded:
+        console.print(
+            f"[cyan]Extracting embedded {embedded.codec_name} subtitle "
+            f"(lang={embedded.language})[/cyan]"
+        )
+        extracted = extract_text_subtitle(opts.video, embedded.index)
+        if extracted:
+            return read_srt(extracted), []
 
     if not opts.use_whisper:
         console.print("[yellow]No subtitles and Whisper disabled — skipping dialogue scan.[/yellow]")
         return [], []
+
+    # Pick which audio track to feed Whisper.
+    try:
+        track = pick_audio_track(streams, opts.audio_track, prefer_language=opts.prefer_language)
+    except ValueError as e:
+        raise SystemExit(str(e))
+    if track is None:
+        console.print("[yellow]No audio tracks found — skipping dialogue scan.[/yellow]")
+        return [], []
+
+    console.print(
+        f"[cyan]Using audio track[/cyan] index={track.index} lang={track.language} "
+        f"codec={track.codec_name}"
+    )
+    audio_path = extract_audio_to_wav(opts.video, track.index)
 
     from cleancut.transcribe import _autodetect_device, transcribe
 
@@ -68,13 +113,17 @@ def _get_subtitles_and_words(
         f"[cyan]Transcribing with Whisper[/cyan] model={config.whisper_model} "
         f"device={device} word_timestamps={config.whisper_word_timestamps}"
     )
-    return transcribe(
-        opts.video,
-        model_name=config.whisper_model,
-        device=device,
-        word_timestamps=config.whisper_word_timestamps,
-        language=config.whisper_language,
-    )
+    try:
+        return transcribe(
+            opts.video,
+            model_name=config.whisper_model,
+            device=device,
+            word_timestamps=config.whisper_word_timestamps,
+            language=config.whisper_language,
+            audio_path=audio_path,
+        )
+    finally:
+        audio_path.unlink(missing_ok=True)
 
 
 def _detect_scenes_if_enabled(opts: PipelineOptions, config: Config) -> list[Shot]:

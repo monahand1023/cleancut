@@ -9,6 +9,13 @@ from rich.console import Console
 from cleancut.config import Config
 from cleancut.edl import EditDecisionList
 from cleancut.pipeline import PipelineOptions, build_edl, render, run_full
+from cleancut.probe import (
+    audio_streams,
+    find_sidecar_subtitle,
+    pick_embedded_subtitle,
+    probe_streams,
+    subtitle_streams,
+)
 
 console = Console()
 
@@ -57,6 +64,7 @@ def _apply_common(args, config: Config) -> None:
         config.encoder = args.encoder
     if args.quality is not None:
         config.quality = args.quality
+    # Track / language selection is on the PipelineOptions, not Config.
 
 
 def _add_common(p: argparse.ArgumentParser) -> None:
@@ -109,6 +117,10 @@ def _add_common(p: argparse.ArgumentParser) -> None:
                    help="Video encoder. auto = videotoolbox on macOS, libx264 elsewhere.")
     p.add_argument("--quality", type=int, default=None,
                    help="Quality (libx264 CRF; lower=better). Default depends on preset.")
+    p.add_argument("--audio-track", type=int, default=None,
+                   help="0-indexed audio track to transcribe (audio:0, audio:1, …). Default: prefer English.")
+    p.add_argument("--prefer-language", default="eng",
+                   help="ISO-639 language code to prefer for subs and audio (default: eng).")
 
 
 def cmd_scan(args) -> int:
@@ -121,6 +133,8 @@ def cmd_scan(args) -> int:
         use_visual=not args.no_visual,
         use_whisper=not args.no_whisper,
         use_scenes=not args.no_scenes,
+        audio_track=args.audio_track,
+        prefer_language=args.prefer_language,
     )
     edl, _ = build_edl(opts, config)
     edl.to_json(opts.edl_out)
@@ -143,9 +157,45 @@ def cmd_clean(args) -> int:
         use_whisper=not args.no_whisper,
         use_scenes=not args.no_scenes,
         burn_subs=not args.no_burn_subs,
+        audio_track=args.audio_track,
+        prefer_language=args.prefer_language,
     )
     out = run_full(opts, config)
     console.print(f"[green bold]Wrote[/green bold] {out}")
+    return 0
+
+
+def cmd_inspect(args) -> int:
+    video = Path(args.video)
+    if not video.exists():
+        console.print(f"[red]Not found:[/red] {video}")
+        return 1
+    streams = probe_streams(video)
+    console.print(f"[bold]File:[/bold] {video}")
+
+    audios = audio_streams(streams)
+    console.print(f"\n[bold cyan]Audio tracks ({len(audios)})[/bold cyan]")
+    for i, s in enumerate(audios):
+        ch = f"{s.channels}ch" if s.channels else ""
+        console.print(f"  audio:{i}  index={s.index}  lang={s.language}  {s.codec_name}  {ch}  {s.title}")
+
+    subs_streams = subtitle_streams(streams)
+    console.print(f"\n[bold cyan]Embedded subtitle tracks ({len(subs_streams)})[/bold cyan]")
+    for i, s in enumerate(subs_streams):
+        kind = "TEXT" if s.codec_name in {"subrip", "srt", "mov_text", "ass", "ssa", "webvtt"} else "image"
+        console.print(f"  sub:{i}    index={s.index}  lang={s.language}  {s.codec_name} [{kind}]  {s.title}")
+    embedded = pick_embedded_subtitle(streams, prefer_language=args.prefer_language)
+    if embedded:
+        console.print(f"  → would extract: stream index {embedded.index} ({embedded.codec_name}, {embedded.language})")
+
+    sidecar = find_sidecar_subtitle(video, prefer_language=args.prefer_language)
+    console.print("\n[bold cyan]Sidecar .srt files[/bold cyan]")
+    if sidecar:
+        console.print(f"  → chosen: {sidecar}")
+    # Show every candidate for transparency.
+    for p in sorted(video.parent.glob("*.srt")):
+        marker = " ✓" if p == sidecar else ""
+        console.print(f"  {p.name}{marker}")
     return 0
 
 
@@ -168,6 +218,11 @@ def main(argv: list[str] | None = None) -> int:
     p_clean.add_argument("--edl-out", help="Also write the (re-)built EDL here.")
     _add_common(p_clean)
     p_clean.set_defaults(func=cmd_clean)
+
+    p_inspect = sub.add_parser("inspect", help="Show audio tracks, subtitle tracks, and sidecar .srt files.")
+    p_inspect.add_argument("video", help="Input video.")
+    p_inspect.add_argument("--prefer-language", default="eng", help="Language to prefer when picking the best track.")
+    p_inspect.set_defaults(func=cmd_inspect)
 
     args = parser.parse_args(argv)
     try:

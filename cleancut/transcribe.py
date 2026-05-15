@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import os
+import shutil
+import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,11 +42,16 @@ def transcribe(
     device: str | None = None,
     word_timestamps: bool = True,
     language: str | None = None,
+    audio_path: Path | None = None,
 ) -> tuple[list[Subtitle], list[Word]]:
-    """Run Whisper on `video_path`.
+    """Run Whisper on `video_path` (or on `audio_path` if provided).
 
     Returns (segment-level subtitles, word-level words). If `word_timestamps`
     is False, the words list will be empty.
+
+    When `audio_path` is provided (e.g. a pre-extracted English dub track),
+    Whisper transcribes that instead — useful for multi-track files where
+    Whisper would otherwise default to track 0.
     """
     try:
         import whisper  # type: ignore
@@ -58,8 +66,9 @@ def transcribe(
     fp16 = device == "cuda"
 
     model = whisper.load_model(model_name, device=device)
+    input_for_whisper = str(audio_path) if audio_path else str(video_path)
     result = model.transcribe(
-        str(video_path),
+        input_for_whisper,
         verbose=False,
         word_timestamps=word_timestamps,
         fp16=fp16,
