@@ -46,6 +46,8 @@ class PipelineOptions:
     audio_track: int | None = None
     # ISO language code to prefer for both sidecar .srt and audio track ("eng", "spa", …).
     prefer_language: str = "eng"
+    # If set, persist Whisper output to this .srt path (and .words.json alongside).
+    save_transcript: Path | None = None
 
 
 def _get_subtitles_and_words(
@@ -114,7 +116,7 @@ def _get_subtitles_and_words(
         f"device={device} word_timestamps={config.whisper_word_timestamps}"
     )
     try:
-        return transcribe(
+        subs, words = transcribe(
             opts.video,
             model_name=config.whisper_model,
             device=device,
@@ -124,6 +126,23 @@ def _get_subtitles_and_words(
         )
     finally:
         audio_path.unlink(missing_ok=True)
+
+    # Persist the transcript so subsequent scans can reuse it without re-running Whisper.
+    if opts.save_transcript:
+        srt_out = Path(opts.save_transcript)
+        srt_out.parent.mkdir(parents=True, exist_ok=True)
+        write_srt(subs, srt_out)
+        console.print(f"[green]Saved transcript[/green] {srt_out}")
+        if words:
+            words_out = srt_out.with_suffix(".words.json")
+            import json
+            words_out.write_text(json.dumps(
+                [{"start": w.start, "end": w.end, "text": w.text, "probability": w.probability}
+                 for w in words], indent=2,
+            ))
+            console.print(f"[green]Saved word timings[/green] {words_out}")
+
+    return subs, words
 
 
 def _detect_scenes_if_enabled(opts: PipelineOptions, config: Config) -> list[Shot]:

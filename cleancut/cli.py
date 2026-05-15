@@ -122,6 +122,8 @@ def _add_common(p: argparse.ArgumentParser) -> None:
                    help="0-indexed audio track to transcribe (audio:0, audio:1, …). Default: prefer English.")
     p.add_argument("--prefer-language", default="eng",
                    help="ISO-639 language code to prefer for subs and audio (default: eng).")
+    p.add_argument("--save-transcript", default=None,
+                   help="Persist Whisper output to this .srt path (and .words.json alongside).")
 
 
 def cmd_scan(args) -> int:
@@ -136,6 +138,7 @@ def cmd_scan(args) -> int:
         use_scenes=not args.no_scenes,
         audio_track=args.audio_track,
         prefer_language=args.prefer_language,
+        save_transcript=Path(args.save_transcript) if args.save_transcript else None,
     )
     edl, _ = build_edl(opts, config)
     edl.to_json(opts.edl_out)
@@ -171,6 +174,7 @@ def cmd_clean(args) -> int:
         burn_subs=not args.no_burn_subs,
         audio_track=args.audio_track,
         prefer_language=args.prefer_language,
+        save_transcript=Path(args.save_transcript) if args.save_transcript else None,
     )
     out = run_full(opts, config)
     console.print(f"[green bold]Wrote[/green bold] {out}")
