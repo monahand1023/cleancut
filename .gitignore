@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+dist/
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Editors
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# Project
+work/
+output/
+*.mp4
+*.mkv
+*.mov
+*.avi
+*.webm
+*.srt
+*.vtt
+# but track the test fixture
+!tests/fixtures/*.srt
+
+# Whisper / model caches
+models/
+*.pt
+*.bin
+*.onnx
+
+# Editor state
+*.edl.json
+!examples/*.edl.json
