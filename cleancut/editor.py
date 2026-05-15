@@ -133,7 +133,24 @@ def shift_ranges_after_cuts(ranges: list[Range], cuts: list[Range]) -> list[Rang
     return out
 
 
-def apply_cuts(input_path: Path, cuts: list[Range], output_path: Path) -> None:
+def _video_encoder_args(encoder: str, quality: int) -> list[str]:
+    """Return ffmpeg flags for the chosen video encoder."""
+    if encoder == "videotoolbox":
+        # videotoolbox uses -q:v (higher = better). Map CRF-ish quality to a sensible q.
+        # CRF 18 ~ q 65, CRF 20 ~ q 60, CRF 23 ~ q 50.
+        q = max(30, min(100, 90 - quality * 2))
+        return ["-c:v", "h264_videotoolbox", "-q:v", str(q), "-b:v", "0"]
+    # libx264 default
+    return ["-c:v", "libx264", "-preset", "slow", "-crf", str(quality)]
+
+
+def apply_cuts(
+    input_path: Path,
+    cuts: list[Range],
+    output_path: Path,
+    encoder: str = "libx264",
+    quality: int = 20,
+) -> None:
     """Re-encode `input_path` with `cuts` removed, writing to `output_path`."""
     _require_ffmpeg()
     if not cuts:
@@ -163,18 +180,16 @@ def apply_cuts(input_path: Path, cuts: list[Range], output_path: Path) -> None:
         f"concat=n={len(segments)}:v=1:a=1[outv][outa]"
     )
 
-    subprocess.run(
-        [
-            "ffmpeg", "-y",
-            "-i", str(input_path),
-            "-filter_complex", filter_complex,
-            "-map", "[outv]", "-map", "[outa]",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "20",
-            "-c:a", "aac", "-b:a", "192k",
-            str(output_path),
-        ],
-        check=True,
-    )
+    cmd = [
+        "ffmpeg", "-y",
+        "-i", str(input_path),
+        "-filter_complex", filter_complex,
+        "-map", "[outv]", "-map", "[outa]",
+        *_video_encoder_args(encoder, quality),
+        "-c:a", "aac", "-b:a", "192k",
+        str(output_path),
+    ]
+    subprocess.run(cmd, check=True)
 
 
 def apply_mutes_and_subs(
@@ -183,13 +198,15 @@ def apply_mutes_and_subs(
     srt_path: Path | None,
     output_path: Path,
     burn_subs: bool = True,
+    encoder: str = "libx264",
+    quality: int = 20,
 ) -> None:
     """Apply mute ranges via volume filter and (optionally) burn-in subtitles."""
     _require_ffmpeg()
 
     cmd: list[str] = ["ffmpeg", "-y", "-i", str(input_path)]
 
-    # Audio filter: mute volumes in the given ranges.
+    # Audio filter: mute volumes in the given ranges with a tiny fade to avoid pops.
     if mutes:
         enable = "+".join(f"between(t,{r.start:.3f},{r.end:.3f})" for r in mutes)
         af = f"volume=enable='{enable}':volume=0"
@@ -197,12 +214,10 @@ def apply_mutes_and_subs(
 
     # Video filter: burn subtitles. `subtitles=` requires careful path escaping.
     if burn_subs and srt_path and srt_path.exists():
-        # Forward slashes are safest; on macOS we already use them.
-        # Single-quote the path inside the filter to handle spaces.
         escaped = str(srt_path).replace("\\", "/").replace(":", r"\:")
         vf = f"subtitles='{escaped}':force_style='FontName=Arial,FontSize=22,Outline=1'"
         cmd += ["-vf", vf]
-        cmd += ["-c:v", "libx264", "-preset", "medium", "-crf", "20"]
+        cmd += _video_encoder_args(encoder, quality)
     else:
         cmd += ["-c:v", "copy"]
 

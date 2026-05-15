@@ -1,13 +1,25 @@
-"""Visual scene detection using NudeNet on sampled frames."""
+"""Visual scene detection using NudeNet on sampled frames.
+
+Two scanning modes:
+1. Streak mode (no shot list): per-second sampling, emit a cut when at least
+   `min_streak` consecutive samples all hit. Robust against single-frame
+   false positives.
+2. Shot-aware mode: given a shot list from PySceneDetect, evaluate each shot
+   independently. A shot is cut when at least `shot_hit_fraction` of its
+   sampled frames are flagged. Far more robust because we never cut mid-shot.
+"""
 
 from __future__ import annotations
 
 from pathlib import Path
 
+from tqdm import tqdm
+
 from cleancut.config import Config
 from cleancut.edl import EditDecision, EditDecisionList
+from cleancut.scenes import Shot
 
-# NudeNet class names that signal explicit content.
+# NudeNet class names that signal explicit content. Trip a cut on hit.
 EXPLICIT_CLASSES = {
     "FEMALE_BREAST_EXPOSED",
     "FEMALE_GENITALIA_EXPOSED",
@@ -16,22 +28,8 @@ EXPLICIT_CLASSES = {
     "ANUS_EXPOSED",
 }
 
-# Borderline classes — flag but don't auto-cut at lower confidence.
-SUGGESTIVE_CLASSES = {
-    "FEMALE_BREAST_COVERED",
-    "BUTTOCKS_COVERED",
-    "FEMALE_GENITALIA_COVERED",
-    "FEET_EXPOSED",
-    "BELLY_EXPOSED",
-}
 
-
-def scan_video(video_path: Path, config: Config) -> EditDecisionList:
-    """Sample frames from the video and run NudeNet on each.
-
-    Returns an EDL with one EditDecision per flagged frame. Adjacent frames
-    are merged later in the pipeline.
-    """
+def _open_video_and_detector(video_path: Path):
     try:
         import cv2  # type: ignore
         from nudenet import NudeDetector  # type: ignore
@@ -44,55 +42,164 @@ def scan_video(video_path: Path, config: Config) -> EditDecisionList:
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"Could not open video: {video_path}")
+    return cv2, detector, cap
 
-    fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-    duration = total_frames / fps if fps > 0 else 0.0
 
-    sample_interval = max(1, int(round(fps * config.visual_sample_seconds)))
+def _is_explicit(detections, threshold: float) -> bool:
+    return any(
+        d.get("class") in EXPLICIT_CLASSES and float(d.get("score", 0)) >= threshold
+        for d in detections
+    )
+
+
+def _detect_on_frame(detector, cv2, frame) -> list[dict]:
+    """NudeNet's detect() signature varies by build — some want a path."""
+    try:
+        return detector.detect(frame)
+    except Exception:
+        import tempfile
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            cv2.imwrite(tmp.name, frame)
+            return detector.detect(tmp.name)
+
+
+def scan_video(
+    video_path: Path,
+    config: Config,
+    shots: list[Shot] | None = None,
+) -> EditDecisionList:
+    """Sample frames and produce cut decisions. Shot-aware when shots given."""
+    cv2, detector, cap = _open_video_and_detector(video_path)
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        duration = total_frames / fps if fps > 0 else 0.0
+        action = config.actions.get("nudity", "cut")
+
+        if shots:
+            return _shot_aware_scan(
+                cv2, detector, cap, fps, duration, shots, config, action
+            )
+        return _streak_scan(
+            cv2, detector, cap, fps, duration, config, action
+        )
+    finally:
+        cap.release()
+
+
+def _streak_scan(cv2, detector, cap, fps, duration, config: Config, action: str) -> EditDecisionList:
+    """No shot info: walk the video by `visual_sample_seconds`; require
+    `visual_min_streak` consecutive hits before emitting a cut."""
+    sample_step = config.visual_sample_seconds
+    min_streak = max(1, config.visual_min_streak)
     edl = EditDecisionList()
 
-    frame_idx = 0
-    while True:
-        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+    n_samples = int(duration / sample_step) if duration > 0 else 0
+    streak_start: float | None = None
+    streak_classes: set[str] = set()
+    last_hit_t: float | None = None
+
+    for i in tqdm(range(n_samples), desc="Visual scan", unit="frame", leave=False):
+        t = i * sample_step
+        cap.set(cv2.CAP_PROP_POS_FRAMES, int(round(t * fps)))
         ok, frame = cap.read()
         if not ok or frame is None:
-            break
-
-        t = frame_idx / fps
-
-        # NudeNet detect() accepts file paths or numpy arrays.
-        try:
-            detections = detector.detect(frame)
-        except Exception:
-            # Some NudeNet builds require a path. Write a temp jpg.
-            import tempfile
-            with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-                cv2.imwrite(tmp.name, frame)
-                detections = detector.detect(tmp.name)
-
-        explicit_hits = [
+            continue
+        detections = _detect_on_frame(detector, cv2, frame)
+        hits = [
             d for d in detections
             if d.get("class") in EXPLICIT_CLASSES
             and float(d.get("score", 0)) >= config.visual_threshold
         ]
-        if explicit_hits:
-            classes = ", ".join(sorted(set(d["class"] for d in explicit_hits)))
-            action = config.actions.get("nudity", "cut")
+        if hits:
+            if streak_start is None:
+                streak_start = t
+            streak_classes.update(d["class"] for d in hits)
+            last_hit_t = t
+        else:
+            if streak_start is not None and last_hit_t is not None:
+                _emit_if_long_enough(
+                    edl, streak_start, last_hit_t + sample_step,
+                    streak_classes, min_streak, sample_step, action,
+                )
+                streak_start = None
+                streak_classes = set()
+
+    if streak_start is not None and last_hit_t is not None:
+        _emit_if_long_enough(
+            edl, streak_start, last_hit_t + sample_step,
+            streak_classes, min_streak, sample_step, action,
+        )
+
+    return edl
+
+
+def _emit_if_long_enough(
+    edl: EditDecisionList,
+    start: float,
+    end: float,
+    classes: set[str],
+    min_streak: int,
+    sample_step: float,
+    action: str,
+) -> None:
+    n_samples = max(1, round((end - start) / sample_step))
+    if n_samples >= min_streak:
+        edl.add(
+            EditDecision(
+                start=start,
+                end=end,
+                action=action,
+                category="nudity",
+                reason=f"visual streak ({n_samples} frames): {', '.join(sorted(classes))}",
+                source="visual",
+            )
+        )
+
+
+def _shot_aware_scan(
+    cv2, detector, cap, fps, duration, shots: list[Shot], config: Config, action: str,
+) -> EditDecisionList:
+    """For each shot: sample frames, compute hit fraction, cut shot if over threshold."""
+    edl = EditDecisionList()
+    sample_step = config.visual_sample_seconds
+    min_fraction = config.visual_shot_hit_fraction
+    min_frames_in_shot = 2  # tiny shots get a free pass
+
+    for shot in tqdm(shots, desc="Visual scan (shots)", unit="shot", leave=False):
+        if shot.duration <= 0:
+            continue
+        # Sample at sample_step within the shot, with a minimum of 2 samples.
+        n = max(min_frames_in_shot, int(shot.duration / sample_step))
+        times = [shot.start + (shot.duration * (k + 0.5) / n) for k in range(n)]
+        hit_classes: set[str] = set()
+        n_hits = 0
+        for t in times:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(round(t * fps)))
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                continue
+            detections = _detect_on_frame(detector, cv2, frame)
+            hits = [
+                d for d in detections
+                if d.get("class") in EXPLICIT_CLASSES
+                and float(d.get("score", 0)) >= config.visual_threshold
+            ]
+            if hits:
+                n_hits += 1
+                hit_classes.update(d["class"] for d in hits)
+
+        fraction = n_hits / max(1, len(times))
+        if fraction >= min_fraction and n_hits >= 2:
             edl.add(
                 EditDecision(
-                    start=t,
-                    end=t + config.visual_sample_seconds,
+                    start=shot.start,
+                    end=shot.end,
                     action=action,
                     category="nudity",
-                    reason=f"visual: {classes}",
-                    source="visual",
+                    reason=f"shot {n_hits}/{len(times)} frames flagged: {', '.join(sorted(hit_classes))}",
+                    source="visual-shot",
                 )
             )
 
-        frame_idx += sample_interval
-        if duration and t >= duration:
-            break
-
-    cap.release()
     return edl

@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 from rich.console import Console
 
 from cleancut.config import Config
-from cleancut.edl import EditDecisionList
+from cleancut.edl import EditDecision, EditDecisionList
 from cleancut.editor import (
     Range,
     adjust_subtitles_for_cuts,
@@ -18,10 +17,12 @@ from cleancut.editor import (
     edl_to_ranges,
     shift_ranges_after_cuts,
 )
+from cleancut.scenes import Shot, snap_range_to_shots
 from cleancut.subtitles import (
     Subtitle,
     read_srt,
     scan_subtitles,
+    scan_words,
     softened_subtitles,
     write_srt,
 )
@@ -38,50 +39,127 @@ class PipelineOptions:
     edl_out: Path | None = None
     use_visual: bool = True
     use_whisper: bool = True
+    use_scenes: bool = True
     burn_subs: bool = True
     work_dir: Path | None = None
 
 
-def get_subtitles(opts: PipelineOptions, config: Config) -> list[Subtitle]:
-    """Read .srt if provided, else look next to video, else transcribe with Whisper."""
+def _get_subtitles_and_words(
+    opts: PipelineOptions, config: Config
+) -> tuple[list[Subtitle], list]:
+    """Read .srt if provided, else look beside the video, else transcribe with Whisper."""
     if opts.subs and opts.subs.exists():
         console.print(f"[cyan]Reading subtitles[/cyan] {opts.subs}")
-        return read_srt(opts.subs)
+        return read_srt(opts.subs), []
 
-    # Look for sibling .srt
     sibling = opts.video.with_suffix(".srt")
     if sibling.exists():
         console.print(f"[cyan]Found sibling .srt[/cyan] {sibling}")
-        return read_srt(sibling)
+        return read_srt(sibling), []
 
     if not opts.use_whisper:
         console.print("[yellow]No subtitles and Whisper disabled — skipping dialogue scan.[/yellow]")
+        return [], []
+
+    from cleancut.transcribe import _autodetect_device, transcribe
+
+    device = config.whisper_device or _autodetect_device()
+    console.print(
+        f"[cyan]Transcribing with Whisper[/cyan] model={config.whisper_model} "
+        f"device={device} word_timestamps={config.whisper_word_timestamps}"
+    )
+    return transcribe(
+        opts.video,
+        model_name=config.whisper_model,
+        device=device,
+        word_timestamps=config.whisper_word_timestamps,
+        language=config.whisper_language,
+    )
+
+
+def _detect_scenes_if_enabled(opts: PipelineOptions, config: Config) -> list[Shot]:
+    if not opts.use_scenes:
+        return []
+    try:
+        from cleancut.scenes import detect_shots
+    except RuntimeError as e:
+        console.print(f"[yellow]Scene detection skipped: {e}[/yellow]")
+        return []
+    console.print(f"[cyan]Detecting shot boundaries[/cyan] (threshold={config.scene_threshold})")
+    try:
+        shots = detect_shots(opts.video, threshold=config.scene_threshold)
+        console.print(f"[green]Found {len(shots)} shots[/green]")
+        return shots
+    except Exception as e:
+        console.print(f"[yellow]Scene detection failed: {e}[/yellow]")
         return []
 
-    console.print(f"[cyan]Transcribing with Whisper ({config.whisper_model})[/cyan] — this may take a while…")
-    from cleancut.transcribe import transcribe
-    return transcribe(opts.video, config.whisper_model)
+
+def _snap_edl_to_shots(edl: EditDecisionList, shots: list[Shot]) -> EditDecisionList:
+    """Extend each `cut` decision outward to enclosing shot boundaries.
+
+    Mutes are left alone — they're audio-only and should be word-precise.
+    """
+    if not shots:
+        return edl
+    out: list[EditDecision] = []
+    for d in edl.decisions:
+        if d.action == "cut":
+            ns, ne = snap_range_to_shots(d.start, d.end, shots)
+            out.append(
+                EditDecision(
+                    start=ns,
+                    end=ne,
+                    action=d.action,
+                    category=d.category,
+                    reason=(d.reason + " | snapped-to-shot").strip(" |"),
+                    text_before=d.text_before,
+                    text_after=d.text_after,
+                    source=d.source,
+                    accepted=d.accepted,
+                )
+            )
+        else:
+            out.append(d)
+    return EditDecisionList(decisions=out, video_path=edl.video_path, subtitle_path=edl.subtitle_path)
 
 
 def build_edl(opts: PipelineOptions, config: Config) -> tuple[EditDecisionList, list[Subtitle]]:
     """Run all detectors and produce a merged EDL."""
-    subs = get_subtitles(opts, config)
+    subs, words = _get_subtitles_and_words(opts, config)
 
     edl = EditDecisionList(video_path=str(opts.video), subtitle_path=str(opts.subs or ""))
 
-    if subs:
+    # Dialogue scan: prefer word-level if Whisper gave us words, else line-level.
+    if words:
+        console.print(f"[cyan]Scanning {len(words)} words (word-precise)[/cyan]")
+        edl.extend(scan_words(words, config).decisions)
+    elif subs:
         console.print(f"[cyan]Scanning {len(subs)} subtitle lines[/cyan]")
         edl.extend(scan_subtitles(subs, config).decisions)
 
+    # Shot boundaries (also used for shot-aware visual scan below).
+    shots = _detect_scenes_if_enabled(opts, config)
+
     if opts.use_visual and "nudity" in config.enabled_categories:
-        console.print("[cyan]Visual scan (NudeNet)[/cyan] — this is slow…")
         try:
             from cleancut.visual import scan_video
-            edl.extend(scan_video(opts.video, config).decisions)
+            console.print(
+                f"[cyan]Visual scan[/cyan] "
+                f"({'shot-aware' if shots else 'streak mode'}, "
+                f"sample={config.visual_sample_seconds}s, "
+                f"threshold={config.visual_threshold})"
+            )
+            edl.extend(scan_video(opts.video, config, shots=shots or None).decisions)
         except RuntimeError as e:
             console.print(f"[yellow]Visual scan skipped: {e}[/yellow]")
 
     edl = edl.pad(config.pad_seconds).merge_overlapping(gap=config.merge_gap_seconds).sorted()
+    if shots and config.snap_cuts_to_scenes:
+        edl = _snap_edl_to_shots(edl, shots)
+        # Re-merge after snapping in case adjacent cuts now overlap.
+        edl = edl.merge_overlapping(gap=0.0).sorted()
+
     return edl, subs
 
 
@@ -100,13 +178,14 @@ def render(
 
     cuts = edl_to_ranges(edl, "cut")
     mutes = edl_to_ranges(edl, "mute")
+    encoder = config.resolved_encoder()
+    console.print(f"[cyan]Encoder[/cyan]: {encoder} (q={config.quality})")
 
     # Step 1: apply cuts (re-encode if needed).
     if cuts:
         cut_path = work / f"{opts.video.stem}.cut.mp4"
         console.print(f"[cyan]Applying {len(cuts)} cut(s)…[/cyan]")
-        apply_cuts(opts.video, cuts, cut_path)
-        # Mutes and subtitles need to shift onto the cut timeline.
+        apply_cuts(opts.video, cuts, cut_path, encoder=encoder, quality=config.quality)
         mutes = shift_ranges_after_cuts(mutes, cuts)
         subs = adjust_subtitles_for_cuts(subs, cuts)
     else:
@@ -129,6 +208,8 @@ def render(
         srt_path=srt_for_burn,
         output_path=opts.output,
         burn_subs=bool(srt_for_burn),
+        encoder=encoder,
+        quality=config.quality,
     )
 
     return opts.output
@@ -138,7 +219,7 @@ def run_full(opts: PipelineOptions, config: Config) -> Path:
     if opts.edl_in:
         console.print(f"[cyan]Loading EDL from[/cyan] {opts.edl_in}")
         edl = EditDecisionList.from_json(opts.edl_in)
-        subs = get_subtitles(opts, config)
+        subs, _ = _get_subtitles_and_words(opts, config)
     else:
         edl, subs = build_edl(opts, config)
 

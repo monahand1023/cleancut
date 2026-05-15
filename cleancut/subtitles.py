@@ -123,3 +123,67 @@ def softened_subtitles(subs: list[Subtitle], config: Config) -> list[Subtitle]:
         Subtitle(index=s.index, start=s.start, end=s.end, text=soften_text(s.text, config.replacements))
         for s in subs
     ]
+
+
+def scan_words(words, config: Config) -> EditDecisionList:
+    """Match wordlists against individual word-level Whisper output.
+
+    Produces tight mute ranges around just the offending word(s), instead of
+    the entire subtitle line. Adjacent flagged words within the same phrase
+    will be merged later in the pipeline.
+
+    `words` is a list of cleancut.transcribe.Word; imported lazily to avoid
+    a hard dep on the whisper extras.
+    """
+    patterns = _compile_patterns(config.wordlists)
+    severity = {"profanity": 1, "violence": 2, "drugs": 3, "sex": 4, "nudity": 5}
+    edl = EditDecisionList()
+
+    # Build a running list of (start, end, text) windows for multi-word matches.
+    # We approximate multi-word phrases by looking at 1-, 2-, and 3-word windows
+    # so patterns like "blow job" or "get high" can match.
+    n = len(words)
+    for i, w in enumerate(words):
+        # Build candidate windows starting at i.
+        for window_size in (1, 2, 3):
+            j = i + window_size
+            if j > n:
+                break
+            window = words[i:j]
+            text = " ".join(x.text for x in window).strip(" .,!?-")
+            if not text:
+                continue
+            best: tuple[str, str] | None = None
+            best_sev = -1
+            for category, pats in patterns.items():
+                if category not in config.enabled_categories:
+                    continue
+                for pat in pats:
+                    m = pat.search(text)
+                    if m:
+                        sev = severity.get(category, 0)
+                        if sev > best_sev:
+                            best = (category, m.group(0))
+                            best_sev = sev
+            if best is None:
+                continue
+            category, matched = best
+            action = config.actions.get(category, "mute")
+            if action == "keep":
+                continue
+            edl.add(
+                EditDecision(
+                    start=window[0].start,
+                    end=window[-1].end,
+                    action=action,
+                    category=category,
+                    reason=f"matched: {matched.lower()}",
+                    text_before=text,
+                    text_after=soften_text(text, config.replacements),
+                    source="whisper-word",
+                )
+            )
+            # Don't try shorter windows once we matched; longer phrases take precedence.
+            break
+
+    return edl
