@@ -21,7 +21,7 @@ from cleancut.edl import EditDecision, EditDecisionList
 from cleancut.subtitles import Subtitle
 
 
-SYSTEM_PROMPT = """You are a content classifier for a movie editing tool that removes drug, sex, and violent scenes for family viewing.
+SYSTEM_PROMPT = """You are a content classifier for a movie editing tool that removes drug and sex scenes for family viewing. Violence is HEAVILY UNDER-WEIGHTED — most "violent" content in action films stays in.
 
 You will receive a contiguous chunk of movie dialogue with timestamps. Classify the *scene as a whole*, reading context — not just isolated words.
 
@@ -33,15 +33,37 @@ Output a single JSON object exactly matching this schema:
   "reasoning": string (one short sentence)
 }
 
-Rules:
-- "drugs"   = drug use, dealing, paraphernalia, kicking habit, getting high
-- "sex"     = sexual activity, sexual coercion, intimate dialogue
-- "violence"= explicit violent intent or active violence (not action-movie fighting)
-- "profanity" alone NEVER triggers should_cut=true. Mute, don't cut.
-- should_cut=true ONLY when the scene's plot purpose is the drug/sex/violent content itself
-- Be conservative: if uncertain, prefer "clean" or "profanity" with should_cut=false
-- A martial-arts fight is not "violence" for these purposes
-- An angry character cursing is not "violence"
+Category definitions:
+- "drugs"     = drug use, drug dealing, paraphernalia (pills, syringes, snorting, smoking pipes), kicking the habit, being a junkie, getting high, drug-money exchanges
+- "sex"       = sexual activity, sexual coercion, sexual proposition, intimate bedroom dialogue, post-coital dialogue, prostitution, sexual seduction
+- "violence"  = ONLY: torture, terrorism, weapons used against an unarmed/defenseless person, graphic injury, on-screen kill described in detail, child abuse, rape (also sex)
+- "profanity" = swearing only, no drug/sex/violence content
+- "clean"     = none of the above
+- "multi"     = combination (e.g. drugs+sex)
+
+Rules for should_cut:
+- Profanity alone NEVER triggers should_cut=true. Mute the word; keep the scene.
+- For "violence": should_cut=true ONLY if the dialogue describes torture, killing-the-helpless, or graphic non-combat violence. Fight trash-talk, combat narration, or angry threats during a fight do NOT qualify.
+- For "drugs" and "sex": should_cut=true when the scene's plot purpose IS the drug/sexual content.
+
+CRITICAL: These are NOT violence (return "clean" or "profanity"):
+- "I'll kill you" / "I'll break your face" during a fight
+- "Come on, you bastards" during combat
+- Boxing/MMA/martial-arts commentary ("elbows to the chest", "blow to the head", "knockout")
+- "Fight me" / "Bring it on" / "You're going down"
+- Trash talk between fighters before/during/after a match
+- Bandits or thugs threatening the hero (action-movie staple)
+- Action sequences described by a sports announcer
+- Mob conversations about beating someone up (without graphic detail)
+
+These ARE violence (return "violence" or "multi"):
+- A character tying up or restraining a captive
+- Detailed description of how to kill or maim
+- Threatening a child or non-combatant
+- Mentions of rape, sexual assault, torture by name
+- A character planning a real-world atrocity (mass shooting, bombing civilians)
+
+If a scene is ambiguous between fight and violence: default to "clean" or "profanity" with should_cut=false.
 
 Output JSON only. No prose, no markdown, no commentary."""
 

@@ -43,6 +43,7 @@ PRESETS = {
         "density_enabled": True,
         "llm_enabled": True,
         "vlm_enabled": True,
+        "audio_events_enabled": True,
         "encoder": "libx264",
         "quality": 18,
     },
@@ -104,6 +105,12 @@ class Config:
     vlm_min_confidence: float = 0.55
     vlm_cut_intimate: bool = False
     vlm_gaps_radius: float = 30.0
+    # Audio event detection (HuggingFace AST on AudioSet).
+    audio_events_enabled: bool = False
+    audio_events_model: str = "MIT/ast-finetuned-audioset-10-10-0.4593"
+    audio_events_threshold: float = 0.45
+    audio_events_clip_seconds: float = 8.0
+    audio_events_skip_violence: bool = True
     # Encoder choice for the final render.
     # "videotoolbox" = Apple Silicon hardware H.264 (fast)
     # "libx264" = software (best quality, slower)

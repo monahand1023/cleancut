@@ -259,6 +259,27 @@ def build_edl(opts: PipelineOptions, config: Config) -> tuple[EditDecisionList, 
         except RuntimeError as e:
             console.print(f"[yellow]LLM scan skipped: {e}[/yellow]")
 
+    # Audio event detection (AST) — catches moans/screams/gunshots without dialogue or visible content.
+    if config.audio_events_enabled and shots:
+        try:
+            from cleancut.audio_events import AudioEventParams, scan_audio_events
+            console.print(f"[cyan]Audio event scan[/cyan] model={config.audio_events_model}")
+            ae_edl = scan_audio_events(
+                opts.video, shots,
+                AudioEventParams(
+                    model=config.audio_events_model,
+                    threshold=config.audio_events_threshold,
+                    clip_seconds=config.audio_events_clip_seconds,
+                    skip_violence=config.audio_events_skip_violence,
+                ),
+                audio_track_index=None,  # use first audio track by default; CLI can override
+            )
+            if len(ae_edl):
+                console.print(f"[green]Audio events flagged {len(ae_edl)} shot(s)[/green]")
+                edl.extend(ae_edl.decisions)
+        except RuntimeError as e:
+            console.print(f"[yellow]Audio events skipped: {e}[/yellow]")
+
     # VLM visual scene classification — closes the gap on silent scenes.
     if config.vlm_enabled and shots:
         try:

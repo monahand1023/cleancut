@@ -26,12 +26,24 @@ class Shot:
         return self.start <= t < self.end
 
 
-def detect_shots(video_path: Path, threshold: float = 27.0) -> list[Shot]:
+def detect_shots(video_path: Path, threshold: float = 27.0, use_cache: bool = True) -> list[Shot]:
     """Return all detected shot boundaries.
 
     `threshold` is the PySceneDetect ContentDetector threshold. Lower = more
     sensitive (more cuts). 27 is the library default; 30 is more conservative.
+
+    Results are cached under ~/.cache/cleancut/ keyed by video path/mtime/size
+    and the threshold. Cache survives across runs and across cleancut versions
+    as long as the params match.
     """
+    from cleancut import cache as _cache
+
+    h = _cache.config_hash(threshold=threshold, kind="ContentDetector")
+    if use_cache:
+        hit = _cache.load(video_path, "shots", h)
+        if hit:
+            return [Shot(start=s["start"], end=s["end"]) for s in hit.get("shots", [])]
+
     try:
         from scenedetect import ContentDetector, detect  # type: ignore
     except ImportError as e:
@@ -40,7 +52,13 @@ def detect_shots(video_path: Path, threshold: float = 27.0) -> list[Shot]:
         ) from e
 
     scene_list = detect(str(video_path), ContentDetector(threshold=threshold))
-    return [Shot(start=float(s.get_seconds()), end=float(e.get_seconds())) for s, e in scene_list]
+    shots = [Shot(start=float(s.get_seconds()), end=float(e.get_seconds())) for s, e in scene_list]
+    if use_cache and shots:
+        _cache.save(video_path, "shots", h, {
+            "shots": [{"start": s.start, "end": s.end} for s in shots],
+            "count": len(shots),
+        })
+    return shots
 
 
 def shot_containing(t: float, shots: list[Shot]) -> Shot | None:

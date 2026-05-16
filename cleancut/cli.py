@@ -95,6 +95,10 @@ def _apply_common(args, config: Config) -> None:
         config.vlm_cut_intimate = True
     if args.vlm_gaps_radius is not None:
         config.vlm_gaps_radius = args.vlm_gaps_radius
+    if args.audio_events is not None:
+        config.audio_events_enabled = args.audio_events
+    if args.audio_events_threshold is not None:
+        config.audio_events_threshold = args.audio_events_threshold
     # Track / language selection is on the PipelineOptions, not Config.
 
 
@@ -181,6 +185,11 @@ def _add_common(p: argparse.ArgumentParser) -> None:
                    help="Also cut shots VLM labels 'intimate' (kissing/undressing, no nudity). Off by default.")
     p.add_argument("--vlm-gaps-radius", type=float, default=None,
                    help="In 'gaps' mode: scan shots within N seconds of a flagged range. Default 30.")
+    p.add_argument("--use-audio-events", dest="audio_events", action="store_true", default=None,
+                   help="Enable AST-based audio event detection (moans, screams, gunshots).")
+    p.add_argument("--no-audio-events", dest="audio_events", action="store_false", default=None)
+    p.add_argument("--audio-events-threshold", type=float, default=None,
+                   help="AST confidence threshold (0-1). Default 0.45.")
     p.add_argument("--encoder", default=None, choices=["auto", "videotoolbox", "libx264"],
                    help="Video encoder. auto = videotoolbox on macOS, libx264 elsewhere.")
     p.add_argument("--quality", type=int, default=None,
@@ -268,6 +277,202 @@ def cmd_clean(args) -> int:
     return 0
 
 
+def cmd_add_cut(args) -> int:
+    from cleancut.edl_ops import fmt_timestamp, parse_timestamp
+    from cleancut.scenes import detect_shots
+
+    edl_path = Path(args.edl)
+    if not edl_path.exists():
+        console.print(f"[red]EDL not found:[/red] {edl_path}")
+        return 1
+    edl = EditDecisionList.from_json(edl_path)
+    start = parse_timestamp(args.start)
+    end = parse_timestamp(args.end)
+    if end <= start:
+        console.print(f"[red]end must be > start[/red]")
+        return 1
+
+    if args.snap:
+        try:
+            video = Path(edl.video_path) if edl.video_path else None
+            if video and video.exists():
+                shots = detect_shots(video, threshold=27.0)
+                from cleancut.scenes import snap_range_to_shots
+                ns, ne = snap_range_to_shots(start, end, shots)
+                console.print(
+                    f"[cyan]Snapped to shots:[/cyan] {fmt_timestamp(start)}-{fmt_timestamp(end)} "
+                    f"→ {fmt_timestamp(ns)}-{fmt_timestamp(ne)}"
+                )
+                start, end = ns, ne
+        except Exception as e:
+            console.print(f"[yellow]Snap failed: {e}[/yellow]")
+
+    from cleancut.edl import EditDecision
+    edl.add(EditDecision(
+        start=start, end=end,
+        action=args.action, category=args.category,
+        reason=f"manual: {args.reason}" if args.reason else "manual",
+        source="manual",
+    ))
+    edl = edl.sorted().merge_overlapping(gap=0.5)
+    edl.to_json(edl_path)
+    console.print(
+        f"[green]Added {args.action} {fmt_timestamp(start)}-{fmt_timestamp(end)} "
+        f"({args.category}) to[/green] {edl_path}"
+    )
+
+    # Refresh report
+    try:
+        from cleancut.editor import probe_duration
+        duration = probe_duration(Path(edl.video_path)) if edl.video_path else None
+    except Exception:
+        duration = None
+    report = build_results_report(
+        Path(edl.video_path) if edl.video_path else Path("?"),
+        None, edl, original_duration=duration,
+    )
+    report_path = edl_path.with_suffix(".report.txt")
+    write_report(report, report_path)
+    console.print(f"[green]Report refreshed[/green] {report_path}")
+    return 0
+
+
+def cmd_review(args) -> int:
+    import json
+    import subprocess
+    from cleancut.edl_ops import fmt_timestamp
+
+    edl_path = Path(args.edl)
+    if not edl_path.exists():
+        console.print(f"[red]EDL not found:[/red] {edl_path}")
+        return 1
+    edl = EditDecisionList.from_json(edl_path)
+    video = Path(args.video) if args.video else Path(edl.video_path)
+    if not video.exists():
+        console.print(f"[red]Video not found:[/red] {video}")
+        return 1
+
+    # Optional dialogue context from a .srt
+    subs = []
+    srt = Path(args.subs) if args.subs else None
+    if srt and srt.exists():
+        from cleancut.subtitles import read_srt
+        subs = read_srt(srt)
+
+    # What to review.
+    FOCAL = {"sex", "drugs", "nudity"}
+    def is_focal(d):
+        cats = set(d.category.split("+"))
+        return bool(cats & FOCAL)
+    cuts = [d for d in edl.decisions if d.action == "cut" and d.accepted]
+    if not args.include_violence:
+        cuts = [d for d in cuts if is_focal(d)]
+    cuts.sort(key=lambda d: d.start)
+    if not cuts:
+        console.print("[yellow]No cuts to review.[/yellow]")
+        return 0
+
+    out_dir = Path(args.frames_dir) if args.frames_dir else Path("/tmp/cleancut_review")
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    console.print(
+        f"[bold]Reviewing {len(cuts)} cut(s)[/bold]   "
+        f"(commands: [green]y[/green]=keep, [red]n[/red]=reject, "
+        f"[cyan]t START END[/cyan]=trim, [magenta]s[/magenta]=skip, "
+        f"[yellow]q[/yellow]=save and quit, [white]o[/white]=open frame)"
+    )
+
+    edl_index_by_id = {id(d): i for i, d in enumerate(edl.decisions)}
+    for i, d in enumerate(cuts, 1):
+        # Extract frame
+        t = d.start + d.duration / 2.0
+        h = int(t // 3600); m = int((t % 3600) // 60); sec = t - h * 3600 - m * 60
+        ts = f"{h:02d}:{m:02d}:{sec:06.3f}"
+        frame = out_dir / f"cut_{i:02d}.jpg"
+        subprocess.run(
+            ["ffmpeg", "-y", "-v", "error", "-ss", ts, "-i", str(video),
+             "-frames:v", "1", "-q:v", "3", str(frame)],
+            check=False,
+        )
+        # Dialogue
+        lines = []
+        for s in subs:
+            if s.start < d.end and s.end > d.start:
+                m_ = int(s.start // 60); s_ = s.start - m_ * 60
+                lines.append(f"      [{m_}:{s_:05.2f}] {s.text.strip()}")
+
+        console.print()
+        console.print(
+            f"[bold]Cut {i}/{len(cuts)}[/bold]  "
+            f"{fmt_timestamp(d.start)} → {fmt_timestamp(d.end)}  "
+            f"({d.duration:.1f}s)  [cyan]{d.category}[/cyan]  "
+            f"[white]via {d.source}[/white]"
+        )
+        console.print(f"  reason: {d.reason[:160]}")
+        if lines:
+            console.print("  dialogue:")
+            for ln in lines[:10]:
+                console.print(f"  {ln}")
+            if len(lines) > 10:
+                console.print(f"      … ({len(lines) - 10} more lines)")
+        console.print(f"  frame:    {frame}")
+
+        while True:
+            ans = input("  > ").strip().lower()
+            if not ans:
+                continue
+            if ans == "y":
+                break
+            if ans == "n":
+                d.accepted = False
+                console.print("  [red]rejected[/red]")
+                break
+            if ans == "s":
+                console.print("  [yellow]skipped (no change)[/yellow]")
+                break
+            if ans == "o":
+                subprocess.run(["open", str(frame)], check=False)
+                continue
+            if ans == "q":
+                _save_review(edl, edl_path)
+                return 0
+            if ans.startswith("t "):
+                try:
+                    _, new_s, new_e = ans.split(maxsplit=2)
+                    from cleancut.edl_ops import parse_timestamp
+                    d.start = parse_timestamp(new_s)
+                    d.end = parse_timestamp(new_e)
+                    console.print(
+                        f"  [cyan]trimmed → "
+                        f"{fmt_timestamp(d.start)} → {fmt_timestamp(d.end)}[/cyan]"
+                    )
+                    break
+                except Exception as e:
+                    console.print(f"  [red]bad trim: {e}[/red]")
+                    continue
+            console.print("  [yellow]?[/yellow] y/n/t START END/s/o/q")
+
+    _save_review(edl, edl_path)
+    return 0
+
+
+def _save_review(edl: EditDecisionList, edl_path: Path) -> None:
+    edl.to_json(edl_path)
+    console.print(f"\n[green]Saved {edl_path}[/green]")
+    try:
+        from cleancut.editor import probe_duration
+        duration = probe_duration(Path(edl.video_path)) if edl.video_path else None
+    except Exception:
+        duration = None
+    report = build_results_report(
+        Path(edl.video_path) if edl.video_path else Path("?"),
+        None, edl, original_duration=duration,
+    )
+    report_path = edl_path.with_suffix(".report.txt")
+    write_report(report, report_path)
+    console.print(f"[green]Report refreshed[/green] {report_path}")
+
+
 def cmd_inspect(args) -> int:
     video = Path(args.video)
     if not video.exists():
@@ -349,6 +554,25 @@ def main(argv: list[str] | None = None) -> int:
     p_inspect.add_argument("--report-out", help="Write the plan to this text file.")
     _add_common(p_inspect)
     p_inspect.set_defaults(func=cmd_inspect)
+
+    p_add = sub.add_parser("add-cut", help="Add a manual cut/mute to an existing EDL.")
+    p_add.add_argument("edl", help="EDL JSON file to modify.")
+    p_add.add_argument("--start", required=True, help="Start timestamp (MM:SS or H:MM:SS or seconds).")
+    p_add.add_argument("--end", required=True, help="End timestamp.")
+    p_add.add_argument("--action", choices=["cut", "mute"], default="cut")
+    p_add.add_argument("--category", default="manual")
+    p_add.add_argument("--reason", default=None)
+    p_add.add_argument("--snap", action="store_true", help="Snap range outward to nearest shot boundaries.")
+    p_add.set_defaults(func=cmd_add_cut)
+
+    p_rev = sub.add_parser("review", help="Interactively approve/reject/trim cuts in an EDL.")
+    p_rev.add_argument("edl", help="EDL JSON file to review.")
+    p_rev.add_argument("--video", default=None, help="Source video (default: from EDL).")
+    p_rev.add_argument("--subs", default=None, help="External .srt for dialogue context.")
+    p_rev.add_argument("--frames-dir", default=None, help="Where to extract preview frames (default: /tmp).")
+    p_rev.add_argument("--include-violence", action="store_true",
+                       help="Also review pure-violence cuts (off by default — fights kept).")
+    p_rev.set_defaults(func=cmd_review)
 
     args = parser.parse_args(argv)
     try:

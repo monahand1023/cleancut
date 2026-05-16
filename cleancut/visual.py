@@ -67,8 +67,41 @@ def scan_video(
     video_path: Path,
     config: Config,
     shots: list[Shot] | None = None,
+    use_cache: bool = True,
 ) -> EditDecisionList:
-    """Sample frames and produce cut decisions. Shot-aware when shots given."""
+    """Sample frames and produce cut decisions. Shot-aware when shots given.
+
+    Caches the full result EDL keyed by (video, threshold, sample rate, mode,
+    streak/fraction, shot count + first/last shot times). Re-runs with the
+    same params skip the 1600+ inferences entirely.
+    """
+    from cleancut import cache as _cache
+    from dataclasses import asdict
+
+    mode = "shot-aware" if shots else "streak"
+    shot_fingerprint = None
+    if shots:
+        shot_fingerprint = {
+            "n": len(shots),
+            "first": (shots[0].start, shots[0].end),
+            "last": (shots[-1].start, shots[-1].end),
+        }
+    h = _cache.config_hash(
+        mode=mode,
+        threshold=config.visual_threshold,
+        sample_seconds=config.visual_sample_seconds,
+        min_streak=config.visual_min_streak,
+        hit_fraction=config.visual_shot_hit_fraction,
+        action=config.actions.get("nudity", "cut"),
+        shots=shot_fingerprint,
+    )
+    if use_cache:
+        hit = _cache.load(video_path, "nudenet", h)
+        if hit:
+            return EditDecisionList(
+                decisions=[EditDecision(**d) for d in hit.get("decisions", [])]
+            )
+
     cv2, detector, cap = _open_video_and_detector(video_path)
     try:
         fps = cap.get(cv2.CAP_PROP_FPS) or 24.0
@@ -77,14 +110,21 @@ def scan_video(
         action = config.actions.get("nudity", "cut")
 
         if shots:
-            return _shot_aware_scan(
+            edl = _shot_aware_scan(
                 cv2, detector, cap, fps, duration, shots, config, action
             )
-        return _streak_scan(
-            cv2, detector, cap, fps, duration, config, action
-        )
+        else:
+            edl = _streak_scan(
+                cv2, detector, cap, fps, duration, config, action
+            )
     finally:
         cap.release()
+
+    if use_cache:
+        _cache.save(video_path, "nudenet", h, {
+            "decisions": [asdict(d) for d in edl.decisions],
+        })
+    return edl
 
 
 def _streak_scan(cv2, detector, cap, fps, duration, config: Config, action: str) -> EditDecisionList:
