@@ -1,115 +1,152 @@
 # cleancut
 
-Auto-edit movies for content. Detects profanity, drug references, and sex/nudity, then mutes audio, cuts scenes, and rewrites subtitles to softer text. Outputs a cleaned video file.
+Auto-edit movies for content. Detects profanity, drug references, sex, and nudity using a layered "belt and suspenders" stack of local signals, then mutes audio, cuts scenes, and rewrites subtitles to softer text. Outputs a cleaned `.mp4` with a toggleable softened subtitle track.
 
-Pipeline:
+All AI runs **on-device** — Whisper for transcription, Ollama-hosted LLMs for context, NudeNet + LLaVA for vision, HuggingFace AST for audio events. No cloud APIs.
 
-1. **Subtitles**: parses `.srt` if present, otherwise transcribes with Whisper (defaults to `large-v3`, word-level timestamps, MPS on Apple Silicon).
-2. **Dialogue scan**: matches against configurable wordlists (profanity / drugs / sex / violence). When Whisper words are available, mute ranges are word-precise, not line-precise.
-3. **Shot boundary detection**: PySceneDetect finds every shot cut.
-4. **Visual scan**: samples frames within each shot, runs NudeNet, marks a shot `cut` only if a meaningful fraction of its frames are flagged (kills single-frame false positives).
-5. **Snap to shots**: dialogue-driven cuts extend outward to the enclosing shot boundary, so cuts land on real edits — never mid-shot.
-6. **Render**: ffmpeg applies the EDL (VideoToolbox hardware encoder on macOS by default) and burns softened subtitles back in.
+## Signal stack
 
-The EDL is a plain JSON file — you can hand-edit it between `scan` and `clean` to accept/reject individual cuts.
+| # | Signal | Catches | Cost | Tool |
+|---|---|---|---|---|
+| 1 | **Wordlist match** | Explicit profanity / drugs / sex words | free | regex |
+| 2 | **Context gating** | Drops ambiguous weak hits (e.g. "blow" alone) without strong neighbors | free | regex |
+| 3 | **Density clustering** | Clusters of any wordlist hits → likely a "content scene" | free | python |
+| 4 | **LLM dialogue** | Contextual scenes wordlists miss ("as good as your ex" + drug pushing) | free local | Ollama + Llama 3.1 8B |
+| 5 | **NudeNet** | Explicit nudity (narrow technical kind) | free local | NudeNet |
+| 6 | **VLM scene** | Intimate framing without explicit nudity, drug paraphernalia | free local | Ollama + LLaVA 7B |
+| 7 | **Audio events** | Moans, screams, gunshots — semantic sound events | free local | HuggingFace AST |
 
-### Presets
-
-| Preset      | Whisper      | Sample rate | Streak | Snap-to-shot | Notes                    |
-|-------------|--------------|-------------|--------|--------------|--------------------------|
-| `fast`      | base         | 2.0s        | 2      | off          | Quick first pass         |
-| `balanced`  | small + words| 1.0s        | 2      | on           | Reasonable default       |
-| `thorough`  | large-v3 + words | 0.5s    | 3      | on           | **Default.** Best quality |
-
-`thorough` is the default. On an M-series Mac with 32GB+ RAM, leave it.
+The signals run independently and their results merge into one EDL (Edit Decision List). Density and snap-to-shot post-processing dedupe and align them. The output report shows *which* signal contributed to each cut, so it's auditable.
 
 ## Install
 
 Requires Python 3.10+ and `ffmpeg` on PATH.
 
 ```bash
-brew install ffmpeg            # macOS
+brew install ffmpeg ollama
+ollama serve &                         # starts the Ollama daemon
+ollama pull llama3.1:8b                # for LLM dialogue (~5GB)
+ollama pull llava:7b                   # for VLM visual (~5GB)
+
 cd ~/Development/cleancut
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[full]"       # full = whisper + nudenet
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -e ".[full]"               # whisper + nudenet + scenedetect + ollama + transformers
 ```
 
 Lighter installs:
 
 ```bash
-pip install -e .                 # subtitle-only (no STT, no visual)
-pip install -e ".[whisper]"      # + transcription fallback
-pip install -e ".[visual]"       # + nudenet visual scan
-pip install -e ".[scenes]"       # + PySceneDetect shot boundaries
-pip install -e ".[full]"         # everything (recommended)
+pip install -e .                       # subtitle-only (no STT, no visual, no LLM)
+pip install -e ".[whisper]"            # + transcription fallback
+pip install -e ".[visual,scenes]"      # + NudeNet + PySceneDetect
+pip install -e ".[llm]"                # + Ollama python client
 ```
 
-## Usage
-
-### One-shot auto-clean
+## Quickstart
 
 ```bash
-cleancut clean movie.mp4 --subs movie.srt -o movie.clean.mp4
+# Step 1: see what's in the file and what cleancut would do
+cleancut inspect /path/to/movie.mp4
+
+# Step 2: scan — produces an EDL + report, doesn't render
+cleancut scan /path/to/movie.mp4 \
+  --preset thorough \
+  --save-transcript /path/to/movie.whisper.srt \
+  -o /path/to/movie.edl.json
+
+# Step 3: review interactively — approve/reject/trim each cut
+cleancut review /path/to/movie.edl.json --subs /path/to/movie.whisper.srt
+
+# Step 4: render
+cleancut clean /path/to/movie.mp4 \
+  --edl /path/to/movie.edl.json \
+  --subs /path/to/movie.whisper.srt \
+  -o /path/to/movie.clean.mp4
+
+# Bonus: add a cut by hand if review missed something
+cleancut add-cut /path/to/movie.edl.json --start 58:32 --end 1:00:08 \
+  --category sex --reason "drug dealer / intimate scene"
 ```
 
-Without `--subs`, Whisper will transcribe (slow). Add `--no-visual` to skip the NudeNet pass.
+## Subcommands
 
-### Scan only (produces an EDL you can edit)
+### `cleancut inspect FILE`
+
+Shows audio tracks, subtitle tracks (text vs image), sidecar `.srt` files found, and a "plan" of what `clean` would do given current flags.
+
+### `cleancut scan FILE`
+
+Runs the full signal stack and writes:
+- `<file>.edl.json` — every decision the detectors made
+- `<file>.edl.report.txt` — human-readable report grouped by category
+- Optional `--save-transcript FILE` — caches the Whisper transcript so future scans skip the 30-min Whisper pass via `--subs`
+
+### `cleancut review EDL`
+
+Interactive walkthrough of every accepted cut. For each one, extracts a representative frame, shows the surrounding dialogue, and prompts:
+
+- `y` — keep
+- `n` — reject (sets `accepted=false`)
+- `t START END` — trim the cut range (use `MM:SS` or `H:MM:SS`)
+- `o` — open the extracted frame in your default viewer
+- `s` — skip without changing
+- `q` — save and quit
+
+By default, pure-violence cuts are auto-hidden (fight scenes kept). Pass `--include-violence` to review those too.
+
+### `cleancut add-cut EDL --start MM:SS --end MM:SS`
+
+Manually insert a cut into an EDL. `--snap` extends the range outward to nearest PySceneDetect shot boundaries.
+
+### `cleancut clean FILE -o OUTPUT`
+
+Apply an EDL (either freshly scanned or `--edl FILE`) and render the cleaned video. Subtitles become a soft track in the MP4 container (toggle in any player). With ffmpeg compiled `--enable-libass`, subtitles burn in instead.
+
+## Presets
 
 ```bash
-cleancut scan movie.mp4 --subs movie.srt -o movie.edl.json
+cleancut scan FILE --preset {fast|balanced|thorough}
 ```
 
-### Hand-edit and apply
+| Preset      | Whisper       | Visual sample | Density | LLM | VLM | Audio | Notes                  |
+|-------------|---------------|---------------|---------|-----|-----|-------|------------------------|
+| `fast`      | base          | 2.0s          | off     | off | off | off   | Quick first pass       |
+| `balanced`  | small + words | 1.0s          | on      | off | off | off   | Reasonable default     |
+| `thorough`  | large-v3+words| 0.5s          | on      | on  | on  | on    | **Default.** Best quality |
 
-Open the `.edl.json` in any text editor. Each decision has an `accepted` flag and an `action` (`mute` / `cut` / `keep`) you can change. Then:
-
-### Apply an existing EDL
-
-```bash
-cleancut clean movie.mp4 --edl movie.edl.json -o movie.clean.mp4
-```
-
-### Robustness knobs
-
-```bash
-# Force the most thorough Whisper model, with explicit MPS device:
-cleancut clean movie.mp4 --whisper-model large-v3 --whisper-device mps
-
-# Sample 2 frames per second visually, require 3 consecutive hits:
-cleancut clean movie.mp4 --visual-sample-seconds 0.5 --visual-min-streak 3
-
-# Tighter shot detection (more cuts):
-cleancut clean movie.mp4 --scene-threshold 22
-
-# Highest-quality software encode (slow):
-cleancut clean movie.mp4 --encoder libx264 --quality 16
-```
+`thorough` is the default. On an M-series Mac with 32GB+ RAM, leave it.
 
 ## Configuration
 
-Wordlists and softening replacements live in `cleancut/data/`:
-
-- `wordlists.json` — categorized regex patterns (`profanity`, `drugs`, `sex`, `violence`)
-- `replacements.json` — `"original" -> "softer"` text substitutions for subtitle rewrite
-
-Override with your own file:
+Wordlists and replacements live in `cleancut/data/`. Patterns can be flat strings or `{"pattern": "...", "strength": "strong|weak"}`. **Weak** patterns only fire if a strong hit (any category) is within ±30s — eliminates false positives like "blow" matching "blow to the head" in a boxing scene.
 
 ```bash
-cleancut clean movie.mp4 --wordlists my_words.json --replacements my_replacements.json
+# Override with your own files
+cleancut clean FILE --wordlists my_words.json --replacements my_replacements.json
 ```
 
 ## Categories and actions
 
-| Category   | Default action     | Notes                                                                  |
-|------------|--------------------|------------------------------------------------------------------------|
-| profanity  | mute + soften text | Audio muted in subtitle range, subtitle text softened                  |
-| drugs      | mute + soften text | Same                                                                   |
-| sex        | mute + soften text | Visual matches also trigger `cut`                                      |
-| violence   | mute + soften text | Off by default (enable with `--enable-category violence`)              |
-| nudity     | cut                | Visual-only, NudeNet                                                   |
+| Category   | Default action | Notes                                                          |
+|------------|----------------|----------------------------------------------------------------|
+| profanity  | mute + soften  | Audio muted, subtitle text softened                            |
+| drugs      | mute + soften  | Same                                                           |
+| sex        | mute + soften  | Visual matches also trigger `cut`                              |
+| violence   | keep           | Off by default — fight scenes preserved                        |
+| nudity     | cut            | Visual-only (NudeNet, VLM)                                     |
 
-Override per-category with `--action <category>=<mute|cut|keep>`.
+Override per-category: `--action profanity=cut`, `--enable-category violence`, etc.
+
+## Caching
+
+All heavy computations cache to `~/.cache/cleancut/` keyed by video + config:
+
+- **Whisper transcripts** — pass `--save-transcript FILE` once, then `--subs FILE` on re-runs
+- **PySceneDetect shot boundaries** — auto-cached, ~5-10 min savings per re-run
+- **NudeNet visual scan results** — auto-cached, ~10-30 min savings
+- **Audio event detection** — auto-cached, ~5-10 min savings
+
+Invalidated automatically when the video file changes (mtime/size) or relevant config changes.
 
 ## Legal
 
