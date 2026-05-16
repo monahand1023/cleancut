@@ -306,7 +306,9 @@ def render(
     if not opts.output:
         raise ValueError("output path required for render")
 
-    work = opts.work_dir or opts.video.parent / ".cleancut_work"
+    # Default work dir alongside the OUTPUT, not the source — source dir may have
+    # weird characters that break ffmpeg filters, or may be on a read-only volume.
+    work = opts.work_dir or (opts.output.parent if opts.output else opts.video.parent) / ".cleancut_work"
     work.mkdir(parents=True, exist_ok=True)
 
     cuts = edl_to_ranges(edl, "cut")

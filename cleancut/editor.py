@@ -192,6 +192,17 @@ def apply_cuts(
     subprocess.run(cmd, check=True)
 
 
+def _ffmpeg_has_libass() -> bool:
+    """Check if the installed ffmpeg can run the subtitles= filter (needs libass)."""
+    try:
+        out = subprocess.check_output(
+            ["ffmpeg", "-hide_banner", "-filters"], stderr=subprocess.STDOUT, text=True
+        )
+        return any(line.split()[1:2] == ["subtitles"] for line in out.splitlines() if line.strip())
+    except Exception:
+        return False
+
+
 def apply_mutes_and_subs(
     input_path: Path,
     mutes: list[Range],
@@ -201,28 +212,50 @@ def apply_mutes_and_subs(
     encoder: str = "libx264",
     quality: int = 20,
 ) -> None:
-    """Apply mute ranges via volume filter and (optionally) burn-in subtitles."""
+    """Apply mute ranges via volume filter; add subtitles either as burn-in (libass)
+    or as a soft subtitle track in the container (always works).
+
+    Soft subs are the default unless `burn_subs=True` AND ffmpeg has libass.
+    Soft subs are faster (video can be stream-copied) and toggleable in players.
+    """
     _require_ffmpeg()
+
+    can_burn = burn_subs and srt_path and srt_path.exists() and _ffmpeg_has_libass()
 
     cmd: list[str] = ["ffmpeg", "-y", "-i", str(input_path)]
 
-    # Audio filter: mute volumes in the given ranges with a tiny fade to avoid pops.
+    # If soft-subs mode, add the SRT as a second input.
+    has_soft_subs = srt_path and srt_path.exists() and not can_burn
+    if has_soft_subs:
+        cmd += ["-i", str(srt_path)]
+
+    # Audio filter: mute volumes in the given ranges.
     if mutes:
         enable = "+".join(f"between(t,{r.start:.3f},{r.end:.3f})" for r in mutes)
-        af = f"volume=enable='{enable}':volume=0"
-        cmd += ["-af", af]
+        cmd += ["-af", f"volume=enable='{enable}':volume=0"]
 
-    # Video filter: burn subtitles. `subtitles=` requires careful path escaping.
-    if burn_subs and srt_path and srt_path.exists():
-        escaped = str(srt_path).replace("\\", "/").replace(":", r"\:")
-        vf = f"subtitles='{escaped}':force_style='FontName=Arial,FontSize=22,Outline=1'"
-        cmd += ["-vf", vf]
+    safe_dir: Path | None = None
+    if can_burn:
+        import shutil as _sh
+        safe_dir = Path("/tmp/cleancut-render")
+        safe_dir.mkdir(parents=True, exist_ok=True)
+        safe_srt = safe_dir / "subs.srt"
+        _sh.copy(str(srt_path), str(safe_srt))
+        cmd += ["-vf", "subtitles=subs.srt"]
         cmd += _video_encoder_args(encoder, quality)
+    elif has_soft_subs:
+        # Stream-copy video, encode subs as mov_text into the MP4 container.
+        cmd += ["-map", "0:v", "-map", "0:a", "-map", "1:0"]
+        cmd += ["-c:v", "copy"]
+        cmd += ["-c:s", "mov_text"]
+        cmd += ["-metadata:s:s:0", "language=eng",
+                "-metadata:s:s:0", "title=cleancut (softened)"]
     else:
         cmd += ["-c:v", "copy"]
 
     cmd += ["-c:a", "aac", "-b:a", "192k", str(output_path)]
-    subprocess.run(cmd, check=True)
+    cwd = str(safe_dir) if can_burn else None
+    subprocess.run(cmd, check=True, cwd=cwd)
 
 
 def edl_to_ranges(edl: EditDecisionList, action: str) -> list[Range]:
