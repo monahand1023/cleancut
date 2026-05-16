@@ -57,6 +57,8 @@ def _apply_common(args, config: Config) -> None:
         config.visual_sample_seconds = args.visual_sample_seconds
     if args.visual_min_streak is not None:
         config.visual_min_streak = args.visual_min_streak
+    if args.visual_shot_hit_fraction is not None:
+        config.visual_shot_hit_fraction = args.visual_shot_hit_fraction
     if args.scene_threshold is not None:
         config.scene_threshold = args.scene_threshold
     if args.no_snap_to_scenes:
@@ -65,6 +67,20 @@ def _apply_common(args, config: Config) -> None:
         config.encoder = args.encoder
     if args.quality is not None:
         config.quality = args.quality
+    if args.density is not None:
+        config.density_enabled = args.density
+    if args.density_window is not None:
+        config.density_window_seconds = args.density_window
+    if args.density_min_events is not None:
+        config.density_min_events = args.density_min_events
+    if args.llm is not None:
+        config.llm_enabled = args.llm
+    if args.llm_model:
+        config.llm_model = args.llm_model
+    if args.llm_host:
+        config.llm_host = args.llm_host
+    if args.llm_min_confidence is not None:
+        config.llm_min_confidence = args.llm_min_confidence
     # Track / language selection is on the PipelineOptions, not Config.
 
 
@@ -106,6 +122,8 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--visual-sample-seconds", type=float, default=None, help="Sample 1 frame every N seconds.")
     p.add_argument("--visual-min-streak", type=int, default=None,
                    help="Streak mode: consecutive flagged samples needed to emit a cut.")
+    p.add_argument("--visual-shot-hit-fraction", type=float, default=None,
+                   help="Shot-aware mode: fraction of sampled frames in a shot that must hit (0-1).")
     p.add_argument("--scene-threshold", type=float, default=None,
                    help="PySceneDetect ContentDetector threshold. Lower = more cuts.")
     p.add_argument("--no-snap-to-scenes", action="store_true",
@@ -114,6 +132,24 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--no-whisper", action="store_true", help="Don't transcribe if no .srt is found.")
     p.add_argument("--no-scenes", action="store_true", help="Skip PySceneDetect shot boundary detection.")
     p.add_argument("--no-burn-subs", action="store_true", help="Don't burn the softened subs into the video.")
+    p.add_argument("--density", dest="density", action="store_true", default=None,
+                   help="Enable density clustering (default: on for thorough preset).")
+    p.add_argument("--no-density", dest="density", action="store_false", default=None,
+                   help="Disable density clustering.")
+    p.add_argument("--density-window", type=float, default=None,
+                   help="Rolling window (seconds) for density clustering. Default 60.")
+    p.add_argument("--density-min-events", type=int, default=None,
+                   help="Minimum hits in window to count as a cluster. Default 3.")
+    p.add_argument("--use-llm", dest="llm", action="store_true", default=None,
+                   help="Enable local LLM contextual dialogue classification (via Ollama).")
+    p.add_argument("--no-llm", dest="llm", action="store_false", default=None,
+                   help="Disable LLM dialogue classification.")
+    p.add_argument("--llm-model", default=None,
+                   help="Ollama model name (default: llama3.1:8b).")
+    p.add_argument("--llm-host", default=None,
+                   help="Ollama host URL (default: http://127.0.0.1:11434).")
+    p.add_argument("--llm-min-confidence", type=float, default=None,
+                   help="Discard LLM classifications below this confidence (0-1). Default 0.6.")
     p.add_argument("--encoder", default=None, choices=["auto", "videotoolbox", "libx264"],
                    help="Video encoder. auto = videotoolbox on macOS, libx264 elsewhere.")
     p.add_argument("--quality", type=int, default=None,

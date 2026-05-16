@@ -223,9 +223,46 @@ def build_edl(opts: PipelineOptions, config: Config) -> tuple[EditDecisionList, 
             console.print(f"[yellow]Visual scan skipped: {e}[/yellow]")
 
     edl = edl.pad(config.pad_seconds).merge_overlapping(gap=config.merge_gap_seconds).sorted()
+
+    # Density clustering — promote dense clusters of small hits into a single cut.
+    if config.density_enabled and len(edl) >= config.density_min_events:
+        from cleancut.density import DensityParams, find_clusters
+        console.print("[cyan]Density clustering[/cyan] over dialogue/visual hits")
+        clusters = find_clusters(
+            edl,
+            DensityParams(
+                window_seconds=config.density_window_seconds,
+                min_events=config.density_min_events,
+                min_cluster_span=config.density_min_cluster_span,
+            ),
+        )
+        if len(clusters):
+            console.print(f"[green]Density found {len(clusters)} cluster(s)[/green]")
+            edl.extend(clusters.decisions)
+
+    # LLM-based contextual dialogue classification.
+    if config.llm_enabled and subs:
+        try:
+            from cleancut.classify_dialogue import LLMParams, classify_dialogue
+            console.print(f"[cyan]LLM dialogue scan[/cyan] model={config.llm_model}")
+            llm_edl = classify_dialogue(
+                subs,
+                LLMParams(
+                    model=config.llm_model,
+                    ollama_host=config.llm_host,
+                    min_confidence=config.llm_min_confidence,
+                ),
+            )
+            if len(llm_edl):
+                console.print(f"[green]LLM flagged {len(llm_edl)} scene(s)[/green]")
+                edl.extend(llm_edl.decisions)
+        except RuntimeError as e:
+            console.print(f"[yellow]LLM scan skipped: {e}[/yellow]")
+
+    # Re-merge after adding density/LLM signals.
+    edl = edl.merge_overlapping(gap=config.merge_gap_seconds).sorted()
     if shots and config.snap_cuts_to_scenes:
         edl = _snap_edl_to_shots(edl, shots)
-        # Re-merge after snapping in case adjacent cuts now overlap.
         edl = edl.merge_overlapping(gap=0.0).sorted()
 
     return edl, subs

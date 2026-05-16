@@ -40,6 +40,8 @@ PRESETS = {
         "snap_cuts_to_scenes": True,
         "whisper_model": "large-v3",
         "whisper_word_timestamps": True,
+        "density_enabled": True,
+        "llm_enabled": True,
         "encoder": "libx264",
         "quality": 18,
     },
@@ -83,6 +85,16 @@ class Config:
     whisper_device: str | None = None
     whisper_word_timestamps: bool = True
     whisper_language: str | None = None
+    # Density clustering of EDL events into "scene" cuts.
+    density_enabled: bool = True
+    density_window_seconds: float = 60.0
+    density_min_events: int = 3
+    density_min_cluster_span: float = 8.0
+    # LLM-based contextual dialogue classification (via Ollama).
+    llm_enabled: bool = False
+    llm_model: str = "llama3.1:8b"
+    llm_host: str | None = None
+    llm_min_confidence: float = 0.6
     # Encoder choice for the final render.
     # "videotoolbox" = Apple Silicon hardware H.264 (fast)
     # "libx264" = software (best quality, slower)
