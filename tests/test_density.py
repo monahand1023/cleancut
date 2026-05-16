@@ -3,7 +3,8 @@ from cleancut.edl import EditDecision, EditDecisionList
 
 
 def _d(start, end, cat="profanity"):
-    return EditDecision(start=start, end=end, action="mute", category=cat)
+    # Use "subtitle" source so events qualify as dialogue for density clustering.
+    return EditDecision(start=start, end=end, action="mute", category=cat, source="subtitle")
 
 
 def test_no_cluster_below_min_events():

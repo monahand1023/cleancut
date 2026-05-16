@@ -99,6 +99,10 @@ def _apply_common(args, config: Config) -> None:
         config.audio_events_enabled = args.audio_events
     if args.audio_events_threshold is not None:
         config.audio_events_threshold = args.audio_events_threshold
+    if args.allow_solo_visual:
+        config.require_visual_corroboration = False
+    if args.corroboration_radius is not None:
+        config.corroboration_radius_seconds = args.corroboration_radius
     # Track / language selection is on the PipelineOptions, not Config.
 
 
@@ -190,6 +194,10 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--no-audio-events", dest="audio_events", action="store_false", default=None)
     p.add_argument("--audio-events-threshold", type=float, default=None,
                    help="AST confidence threshold (0-1). Default 0.45.")
+    p.add_argument("--allow-solo-visual", action="store_true",
+                   help="Don't require corroboration for visual-only cuts (NudeNet, VLM).")
+    p.add_argument("--corroboration-radius", type=float, default=None,
+                   help="Visual cuts need a dialogue/audio event within ±N seconds (default 5).")
     p.add_argument("--encoder", default=None, choices=["auto", "videotoolbox", "libx264"],
                    help="Video encoder. auto = videotoolbox on macOS, libx264 elsewhere.")
     p.add_argument("--quality", type=int, default=None,

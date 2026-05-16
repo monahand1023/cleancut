@@ -14,6 +14,18 @@ from dataclasses import dataclass
 from cleancut.edl import EditDecision, EditDecisionList
 
 
+# Density is a *dialogue density* signal. Visual hits (NudeNet, VLM) are excluded
+# from clustering because they shouldn't pull unrelated dialogue mutes into a
+# single oversized cut (see v5 cut #2 ballooning to 65s from a single NudeNet FP).
+DIALOGUE_SOURCES = {
+    "subtitle",
+    "whisper-word",
+    "whisper-line",
+    "llm-dialogue",
+    "audio",        # audio events are content-bearing too
+}
+
+
 @dataclass
 class DensityParams:
     window_seconds: float = 60.0   # rolling window
@@ -23,14 +35,22 @@ class DensityParams:
     min_cluster_span: float = 8.0
 
 
+def _is_dialogue_event(d) -> bool:
+    """True if the event's source qualifies it for density clustering."""
+    # Source may be a combined string from prior merges ("subtitle+vlm").
+    return any(tok in DIALOGUE_SOURCES for tok in d.source.split("+"))
+
+
 def find_clusters(edl: EditDecisionList, params: DensityParams) -> EditDecisionList:
     """Find dense clusters in `edl` and emit one `cut` per cluster.
 
-    Only considers `mute`/`cut` decisions (skips `keep`). Existing cuts inside a
-    cluster are absorbed when the new cut is later merged in the pipeline.
+    Only considers `mute`/`cut` decisions whose source is a dialogue or audio
+    signal — never visual. This prevents a single NudeNet/VLM hit from
+    anchoring a cluster and pulling surrounding wordlist mutes into a giant cut.
     """
     events = sorted(
-        [d for d in edl.decisions if d.action in ("mute", "cut") and d.accepted],
+        [d for d in edl.decisions
+         if d.action in ("mute", "cut") and d.accepted and _is_dialogue_event(d)],
         key=lambda d: d.start,
     )
     if len(events) < params.min_events:

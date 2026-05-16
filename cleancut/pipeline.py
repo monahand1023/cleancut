@@ -314,6 +314,18 @@ def build_edl(opts: PipelineOptions, config: Config) -> tuple[EditDecisionList, 
         edl = _snap_edl_to_shots(edl, shots)
         edl = edl.merge_overlapping(gap=0.0).sorted()
 
+    # Cross-signal corroboration — kill solo-visual flags without dialogue/audio backup.
+    if config.require_visual_corroboration:
+        from cleancut.corroboration import mark_unsupported_visual
+        edl, n_marked = mark_unsupported_visual(
+            edl, radius_seconds=config.corroboration_radius_seconds,
+        )
+        if n_marked:
+            console.print(
+                f"[yellow]Suppressed {n_marked} solo-visual cut(s)[/yellow] "
+                f"(no dialogue/audio within ±{config.corroboration_radius_seconds}s)"
+            )
+
     return edl, subs
 
 
