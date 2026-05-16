@@ -81,6 +81,20 @@ def _apply_common(args, config: Config) -> None:
         config.llm_host = args.llm_host
     if args.llm_min_confidence is not None:
         config.llm_min_confidence = args.llm_min_confidence
+    if args.vlm is not None:
+        config.vlm_enabled = args.vlm
+    if args.vlm_model:
+        config.vlm_model = args.vlm_model
+    if args.vlm_mode:
+        config.vlm_mode = args.vlm_mode
+    if args.vlm_stride is not None:
+        config.vlm_stride = args.vlm_stride
+    if args.vlm_min_confidence is not None:
+        config.vlm_min_confidence = args.vlm_min_confidence
+    if args.vlm_cut_intimate:
+        config.vlm_cut_intimate = True
+    if args.vlm_gaps_radius is not None:
+        config.vlm_gaps_radius = args.vlm_gaps_radius
     # Track / language selection is on the PipelineOptions, not Config.
 
 
@@ -150,6 +164,23 @@ def _add_common(p: argparse.ArgumentParser) -> None:
                    help="Ollama host URL (default: http://127.0.0.1:11434).")
     p.add_argument("--llm-min-confidence", type=float, default=None,
                    help="Discard LLM classifications below this confidence (0-1). Default 0.6.")
+    p.add_argument("--use-vlm", dest="vlm", action="store_true", default=None,
+                   help="Enable local VLM scene classification (visual gap-closing).")
+    p.add_argument("--no-vlm", dest="vlm", action="store_false", default=None,
+                   help="Disable VLM scene classification.")
+    p.add_argument("--vlm-model", default=None,
+                   help="Ollama vision model (default: llava:7b).")
+    p.add_argument("--vlm-mode", default=None,
+                   choices=["all", "silent", "gaps", "silent+gaps"],
+                   help="Which shots to scan. silent+gaps (default) = silent shots + shots near flagged ranges.")
+    p.add_argument("--vlm-stride", type=int, default=None,
+                   help="For 'all' mode: scan every Nth shot. Default 1.")
+    p.add_argument("--vlm-min-confidence", type=float, default=None,
+                   help="Discard VLM classifications below this confidence (0-1). Default 0.55.")
+    p.add_argument("--vlm-cut-intimate", action="store_true",
+                   help="Also cut shots VLM labels 'intimate' (kissing/undressing, no nudity). Off by default.")
+    p.add_argument("--vlm-gaps-radius", type=float, default=None,
+                   help="In 'gaps' mode: scan shots within N seconds of a flagged range. Default 30.")
     p.add_argument("--encoder", default=None, choices=["auto", "videotoolbox", "libx264"],
                    help="Video encoder. auto = videotoolbox on macOS, libx264 elsewhere.")
     p.add_argument("--quality", type=int, default=None,

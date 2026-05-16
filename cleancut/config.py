@@ -42,6 +42,7 @@ PRESETS = {
         "whisper_word_timestamps": True,
         "density_enabled": True,
         "llm_enabled": True,
+        "vlm_enabled": True,
         "encoder": "libx264",
         "quality": 18,
     },
@@ -95,6 +96,14 @@ class Config:
     llm_model: str = "llama3.1:8b"
     llm_host: str | None = None
     llm_min_confidence: float = 0.6
+    # VLM-based visual scene classification (via Ollama).
+    vlm_enabled: bool = False
+    vlm_model: str = "llava:7b"
+    vlm_mode: str = "silent+gaps"
+    vlm_stride: int = 1
+    vlm_min_confidence: float = 0.55
+    vlm_cut_intimate: bool = False
+    vlm_gaps_radius: float = 30.0
     # Encoder choice for the final render.
     # "videotoolbox" = Apple Silicon hardware H.264 (fast)
     # "libx264" = software (best quality, slower)

@@ -259,7 +259,35 @@ def build_edl(opts: PipelineOptions, config: Config) -> tuple[EditDecisionList, 
         except RuntimeError as e:
             console.print(f"[yellow]LLM scan skipped: {e}[/yellow]")
 
-    # Re-merge after adding density/LLM signals.
+    # VLM visual scene classification — closes the gap on silent scenes.
+    if config.vlm_enabled and shots:
+        try:
+            from cleancut.classify_visual import VLMParams, scan_video as vlm_scan
+            cut_on = ("intimate", "explicit", "drug_use", "violence") if config.vlm_cut_intimate \
+                else ("explicit", "drug_use", "violence")
+            console.print(
+                f"[cyan]VLM scene scan[/cyan] model={config.vlm_model} "
+                f"mode={config.vlm_mode}"
+            )
+            vlm_edl = vlm_scan(
+                opts.video, shots, subs, edl,
+                VLMParams(
+                    model=config.vlm_model,
+                    mode=config.vlm_mode,
+                    stride=config.vlm_stride,
+                    min_confidence=config.vlm_min_confidence,
+                    gaps_radius_seconds=config.vlm_gaps_radius,
+                    cut_on=cut_on,
+                    ollama_host=config.llm_host,
+                ),
+            )
+            if len(vlm_edl):
+                console.print(f"[green]VLM flagged {len(vlm_edl)} shot(s)[/green]")
+                edl.extend(vlm_edl.decisions)
+        except RuntimeError as e:
+            console.print(f"[yellow]VLM scan skipped: {e}[/yellow]")
+
+    # Re-merge after adding density/LLM/VLM signals.
     edl = edl.merge_overlapping(gap=config.merge_gap_seconds).sorted()
     if shots and config.snap_cuts_to_scenes:
         edl = _snap_edl_to_shots(edl, shots)
