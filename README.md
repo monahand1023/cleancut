@@ -1,5 +1,7 @@
 # cleancut
 
+[![CI](https://github.com/monahand1023/cleancut/actions/workflows/ci.yml/badge.svg)](https://github.com/monahand1023/cleancut/actions/workflows/ci.yml)
+
 > Auto-edit movies for content — mutes profanity, cuts explicit scenes, softens subtitles. Runs entirely on-device.
 
 cleancut detects profanity, drug references, sex, and nudity using a layered stack of local signals, then mutes audio, cuts scenes, and rewrites subtitles to softer text. The output is a cleaned `.mp4` with a toggleable softened subtitle track.
