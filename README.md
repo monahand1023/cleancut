@@ -1,106 +1,263 @@
 # cleancut
 
-Auto-edit movies for content. Detects profanity, drug references, sex, and nudity using a layered "belt and suspenders" stack of local signals, then mutes audio, cuts scenes, and rewrites subtitles to softer text. Outputs a cleaned `.mp4` with a toggleable softened subtitle track.
+> Auto-edit movies for content — mutes profanity, cuts explicit scenes, softens subtitles. Runs entirely on-device.
 
-All AI runs **on-device** — Whisper for transcription, Ollama-hosted LLMs for context, NudeNet + LLaVA for vision, HuggingFace AST for audio events. No cloud APIs.
+cleancut detects profanity, drug references, sex, and nudity using a layered stack of local signals, then mutes audio, cuts scenes, and rewrites subtitles to softer text. The output is a cleaned `.mp4` with a toggleable softened subtitle track.
+
+**No cloud APIs.** All AI runs locally — Whisper for speech-to-text, Ollama-hosted LLMs for dialogue context, NudeNet + LLaVA for vision, HuggingFace AST for audio events.
+
+---
+
+## Contents
+
+- [How it works](#how-it-works)
+- [Signal stack](#signal-stack)
+- [Requirements](#requirements)
+- [Install](#install)
+- [Quickstart](#quickstart)
+- [Subcommands](#subcommands)
+- [Presets](#presets)
+- [Configuration](#configuration)
+- [Categories and actions](#categories-and-actions)
+- [EDL format](#edl-format)
+- [Caching](#caching)
+- [Troubleshooting](#troubleshooting)
+- [Legal](#legal)
+- [License](#license)
+
+---
+
+## How it works
+
+cleancut runs a layered detection pipeline on a video file and produces an **Edit Decision List (EDL)** — a JSON file describing every proposed cut or mute. The pipeline:
+
+```
+video.mp4
+   │
+   ├─ probe          → detect audio/subtitle tracks, language
+   │
+   ├─ transcribe     → Whisper STT (if no .srt provided)
+   │
+   ├─ subtitle scan  → wordlist match + context gating
+   │   └─ density    → cluster nearby hits into "content scenes"
+   │
+   ├─ LLM dialogue   → Ollama/Llama 3.1 classifies ambiguous scenes
+   │
+   ├─ NudeNet        → frame-level explicit nudity detection
+   │
+   ├─ VLM scene      → LLaVA classifies intimate framing / paraphernalia
+   │
+   └─ Audio events   → HuggingFace AST classifies moans, screams, etc.
+
+All signals merge → EDL → (optional review) → render
+```
+
+Each signal runs independently. Results merge into one EDL, then density clustering and snap-to-shot post-processing dedupe and align the cuts to clean shot boundaries. The report shows which signal triggered each cut, so every decision is auditable.
+
+---
 
 ## Signal stack
 
 | # | Signal | Catches | Cost | Tool |
-|---|---|---|---|---|
+|---|--------|---------|------|------|
 | 1 | **Wordlist match** | Explicit profanity / drugs / sex words | free | regex |
 | 2 | **Context gating** | Drops ambiguous weak hits (e.g. "blow" alone) without strong neighbors | free | regex |
-| 3 | **Density clustering** | Clusters of any wordlist hits → likely a "content scene" | free | python |
-| 4 | **LLM dialogue** | Contextual scenes wordlists miss ("as good as your ex" + drug pushing) | free local | Ollama + Llama 3.1 8B |
-| 5 | **NudeNet** | Explicit nudity (narrow technical kind) | free local | NudeNet |
+| 3 | **Density clustering** | Clusters of any wordlist hits → likely a "content scene" | free | Python |
+| 4 | **LLM dialogue** | Scenes wordlists miss ("as good as your ex", drug pushing) | free local | Ollama + Llama 3.1 8B |
+| 5 | **NudeNet** | Explicit nudity (technical / narrow definition) | free local | NudeNet |
 | 6 | **VLM scene** | Intimate framing without explicit nudity, drug paraphernalia | free local | Ollama + LLaVA 7B |
-| 7 | **Audio events** | Moans, screams, gunshots — semantic sound events | free local | HuggingFace AST |
+| 7 | **Audio events** | Moans, screams, gunshots — semantic sound classification | free local | HuggingFace AST |
 
-The signals run independently and their results merge into one EDL (Edit Decision List). Density and snap-to-shot post-processing dedupe and align them. The output report shows *which* signal contributed to each cut, so it's auditable.
+Visual signals (NudeNet, VLM) require **corroboration** from at least one non-visual signal before a cut fires — this eliminates false positives from action scenes, medical shots, etc.
+
+---
+
+## Requirements
+
+**System:**
+- macOS (Apple Silicon recommended) or Linux
+- Python 3.10+
+- `ffmpeg` with `libass` for subtitle burn-in (optional; soft-sub fallback always works)
+
+**Hardware (for full `thorough` preset):**
+- 16 GB RAM minimum; 32 GB recommended
+- Apple M-series or CUDA GPU for acceptable Whisper and LLaVA speed
+- ~15 GB free disk for model weights (Whisper large-v3 ~3 GB, Llama 3.1 8B ~5 GB, LLaVA 7B ~5 GB)
+
+**Lighter configs (no GPU, 8 GB RAM):** use `--preset fast` or `--preset balanced` — skips LLM, VLM, and audio event detection.
+
+---
 
 ## Install
 
-Requires Python 3.10+ and `ffmpeg` on PATH.
+Install system dependencies first:
 
 ```bash
 brew install ffmpeg ollama
-ollama serve &                         # starts the Ollama daemon
-ollama pull llama3.1:8b                # for LLM dialogue (~5GB)
-ollama pull llava:7b                   # for VLM visual (~5GB)
-
-cd ~/Development/cleancut
-python3.12 -m venv .venv && source .venv/bin/activate
-pip install -e ".[full]"               # whisper + nudenet + scenedetect + ollama + transformers
 ```
 
-Lighter installs:
+Pull the Ollama models you need (only required for `thorough` preset):
 
 ```bash
-pip install -e .                       # subtitle-only (no STT, no visual, no LLM)
-pip install -e ".[whisper]"            # + transcription fallback
-pip install -e ".[visual,scenes]"      # + NudeNet + PySceneDetect
-pip install -e ".[llm]"                # + Ollama python client
+ollama serve &
+ollama pull llama3.1:8b   # LLM dialogue (~5 GB)
+ollama pull llava:7b      # VLM visual (~5 GB)
 ```
+
+Install cleancut:
+
+```bash
+git clone https://github.com/monahand1023/cleancut.git
+cd cleancut
+python3.12 -m venv .venv && source .venv/bin/activate
+pip install -e ".[full]"   # everything: Whisper + NudeNet + PySceneDetect + Ollama + AST
+```
+
+**Lighter installs** (pick what you need):
+
+```bash
+pip install -e .                        # subtitle-only — no STT, no visual, no LLM
+pip install -e ".[whisper]"             # + Whisper transcription
+pip install -e ".[visual,scenes]"       # + NudeNet + PySceneDetect
+pip install -e ".[llm]"                 # + Ollama client
+pip install -e ".[full]"               # everything
+```
+
+Verify install:
+
+```bash
+cleancut --help
+```
+
+---
 
 ## Quickstart
 
+### Full workflow (scan → review → render)
+
 ```bash
-# Step 1: see what's in the file and what cleancut would do
+# 1. Inspect the file — see what tracks are available
 cleancut inspect /path/to/movie.mp4
 
-# Step 2: scan — produces an EDL + report, doesn't render
+# 2. Scan — produces an EDL + report, no video output yet
 cleancut scan /path/to/movie.mp4 \
   --preset thorough \
   --save-transcript /path/to/movie.whisper.srt \
   -o /path/to/movie.edl.json
 
-# Step 3: review interactively — approve/reject/trim each cut
-cleancut review /path/to/movie.edl.json --subs /path/to/movie.whisper.srt
+# 3. Review interactively — approve/reject/trim each cut
+cleancut review /path/to/movie.edl.json \
+  --subs /path/to/movie.whisper.srt
 
-# Step 4: render
+# 4. Render the cleaned video
 cleancut clean /path/to/movie.mp4 \
   --edl /path/to/movie.edl.json \
   --subs /path/to/movie.whisper.srt \
   -o /path/to/movie.clean.mp4
 
-# Bonus: add a cut by hand if review missed something
-cleancut add-cut /path/to/movie.edl.json --start 58:32 --end 1:00:08 \
-  --category sex --reason "drug dealer / intimate scene"
+# 5. Add a manual cut if the review missed something
+cleancut add-cut /path/to/movie.edl.json \
+  --start 58:32 --end 1:00:08 \
+  --category sex --reason "intimate scene"
 ```
+
+### One-shot (scan + render, no review)
+
+```bash
+cleancut clean /path/to/movie.mp4 \
+  --preset thorough \
+  --save-transcript /path/to/movie.whisper.srt \
+  -o /path/to/movie.clean.mp4
+```
+
+---
 
 ## Subcommands
 
 ### `cleancut inspect FILE`
 
-Shows audio tracks, subtitle tracks (text vs image), sidecar `.srt` files found, and a "plan" of what `clean` would do given current flags.
+Shows audio tracks, subtitle tracks (text vs image-based), sidecar `.srt` files found nearby, and a "plan" of what `clean` would do given current flags. Useful for understanding the file before committing to a long scan.
+
+```
+Track 0  audio    eng  aac    stereo
+Track 1  audio    spa  aac    stereo
+Track 2  subtitle eng  (text) subrip
+→ will use: audio track 0 (eng), subtitle track 2
+```
+
+---
 
 ### `cleancut scan FILE`
 
-Runs the full signal stack and writes:
-- `<file>.edl.json` — every decision the detectors made
-- `<file>.edl.report.txt` — human-readable report grouped by category
-- Optional `--save-transcript FILE` — caches the Whisper transcript so future scans skip the 30-min Whisper pass via `--subs`
+Runs the full signal stack (or the subset enabled by your preset/flags) and writes:
+
+- `<file>.edl.json` — every decision (accepted and rejected)
+- `<file>.edl.report.txt` — human-readable summary grouped by category and signal source
+
+Options:
+
+| Flag | Description |
+|------|-------------|
+| `--preset fast\|balanced\|thorough` | Signal configuration (see [Presets](#presets)) |
+| `--subs FILE` | Use this `.srt` instead of running Whisper |
+| `--save-transcript FILE` | Cache Whisper output for future runs |
+| `--no-visual` | Skip NudeNet + VLM |
+| `--no-llm` | Skip Ollama dialogue classification |
+| `--no-audio` | Skip HuggingFace audio events |
+| `--language CODE` | Prefer this language track (`eng`, `spa`, …) |
+| `-o FILE` | Write EDL to this path (default: alongside video) |
+
+---
 
 ### `cleancut review EDL`
 
-Interactive walkthrough of every accepted cut. For each one, extracts a representative frame, shows the surrounding dialogue, and prompts:
+Interactive walkthrough of every accepted cut. For each one, cleancut extracts a representative frame, shows surrounding dialogue context, and prompts:
 
-- `y` — keep
-- `n` — reject (sets `accepted=false`)
-- `t START END` — trim the cut range (use `MM:SS` or `H:MM:SS`)
-- `o` — open the extracted frame in your default viewer
-- `s` — skip without changing
-- `q` — save and quit
+| Key | Action |
+|-----|--------|
+| `y` | Keep this cut |
+| `n` | Reject (sets `accepted=false` in the EDL) |
+| `t START END` | Trim the cut range (`MM:SS` or `H:MM:SS`) |
+| `o` | Open the extracted frame in your default viewer |
+| `s` | Skip without changing |
+| `q` | Save and quit |
 
-By default, pure-violence cuts are auto-hidden (fight scenes kept). Pass `--include-violence` to review those too.
+By default, pure-violence cuts are hidden (fight scenes preserved). Pass `--include-violence` to review those too.
 
-### `cleancut add-cut EDL --start MM:SS --end MM:SS`
+```bash
+cleancut review movie.edl.json --subs movie.whisper.srt --include-violence
+```
 
-Manually insert a cut into an EDL. `--snap` extends the range outward to nearest PySceneDetect shot boundaries.
+---
 
-### `cleancut clean FILE -o OUTPUT`
+### `cleancut add-cut EDL`
 
-Apply an EDL (either freshly scanned or `--edl FILE`) and render the cleaned video. Subtitles become a soft track in the MP4 container (toggle in any player). With ffmpeg compiled `--enable-libass`, subtitles burn in instead.
+Manually insert a cut into an existing EDL:
+
+```bash
+cleancut add-cut movie.edl.json \
+  --start 1:05:22 --end 1:06:44 \
+  --category sex \
+  --reason "bedroom scene missed by VLM" \
+  --snap    # extend to nearest shot boundaries
+```
+
+---
+
+### `cleancut clean FILE`
+
+Apply an EDL and render the cleaned video. If `--edl` is omitted, runs a fresh scan first.
+
+```bash
+cleancut clean movie.mp4 \
+  --edl movie.edl.json \
+  --subs movie.whisper.srt \
+  -o movie.clean.mp4
+```
+
+The subtitle track is written as a **soft (non-burned) track** in the MP4 container — toggle it on/off in VLC, Infuse, Plex, or any standard player. If ffmpeg is compiled with `--enable-libass`, subtitles are burned in instead.
+
+---
 
 ## Presets
 
@@ -108,50 +265,196 @@ Apply an EDL (either freshly scanned or `--edl FILE`) and render the cleaned vid
 cleancut scan FILE --preset {fast|balanced|thorough}
 ```
 
-| Preset      | Whisper       | Visual sample | Density | LLM | VLM | Audio | Notes                  |
-|-------------|---------------|---------------|---------|-----|-----|-------|------------------------|
-| `fast`      | base          | 2.0s          | off     | off | off | off   | Quick first pass       |
-| `balanced`  | small + words | 1.0s          | on      | off | off | off   | Reasonable default     |
-| `thorough`  | large-v3+words| 0.5s          | on      | on  | on  | on    | **Default.** Best quality |
+| Preset | Whisper model | Visual sample rate | Density | LLM | VLM | Audio events | Notes |
+|--------|---------------|--------------------|---------|-----|-----|--------------|-------|
+| `fast` | `base` | 2.0 s | off | off | off | off | Quick first pass |
+| `balanced` | `small` + words | 1.0 s | on | off | off | off | Good default for fast machines |
+| `thorough` | `large-v3` + words | 0.5 s | on | on | on | on | **Default.** Best quality |
 
-`thorough` is the default. On an M-series Mac with 32GB+ RAM, leave it.
+`thorough` is the default. On an M-series Mac with 32 GB+ RAM it takes roughly:
+
+| Stage | Time (90 min film) |
+|-------|--------------------|
+| Whisper large-v3 | 20–35 min |
+| NudeNet | 10–20 min |
+| LLaVA VLM | 15–30 min |
+| AST audio events | 5–10 min |
+| LLM dialogue | 2–5 min |
+
+All stages cache — re-runs that reuse cached results take ~30 seconds.
+
+---
 
 ## Configuration
 
-Wordlists and replacements live in `cleancut/data/`. Patterns can be flat strings or `{"pattern": "...", "strength": "strong|weak"}`. **Weak** patterns only fire if a strong hit (any category) is within ±30s — eliminates false positives like "blow" matching "blow to the head" in a boxing scene.
+### Wordlists and replacements
+
+Wordlists live in `cleancut/data/wordlists.json`. Each entry can be a plain string or an object:
+
+```json
+{
+  "profanity": [
+    "fuck",
+    { "pattern": "crap", "strength": "weak" }
+  ]
+}
+```
+
+**Weak** patterns only fire when a **strong** hit (any category) is within ±30 seconds. This eliminates false positives like "blow" matching "blow to the head" in a boxing scene.
+
+**Replacements** live in `cleancut/data/replacements.json` and map explicit subtitle text to softer alternatives shown in the cleaned output:
+
+```json
+{
+  "fuck": "frick",
+  "shit": "shoot"
+}
+```
+
+Override with your own files:
 
 ```bash
-# Override with your own files
-cleancut clean FILE --wordlists my_words.json --replacements my_replacements.json
+cleancut clean FILE \
+  --wordlists my_words.json \
+  --replacements my_replacements.json
 ```
+
+### Per-category action overrides
+
+```bash
+# Cut profanity instead of muting
+cleancut clean FILE --action profanity=cut
+
+# Enable violence cuts (off by default)
+cleancut clean FILE --enable-category violence
+
+# Disable nudity cuts
+cleancut clean FILE --disable-category nudity
+```
+
+### Audio track selection
+
+```bash
+# Force a specific audio track (0-indexed)
+cleancut clean FILE --audio-track 1
+
+# Prefer Spanish audio/subtitles
+cleancut clean FILE --language spa
+```
+
+---
 
 ## Categories and actions
 
-| Category   | Default action | Notes                                                          |
-|------------|----------------|----------------------------------------------------------------|
-| profanity  | mute + soften  | Audio muted, subtitle text softened                            |
-| drugs      | mute + soften  | Same                                                           |
-| sex        | mute + soften  | Visual matches also trigger `cut`                              |
-| violence   | keep           | Off by default — fight scenes preserved                        |
-| nudity     | cut            | Visual-only (NudeNet, VLM)                                     |
+| Category | Default action | Notes |
+|----------|----------------|-------|
+| `profanity` | `mute` + soften | Audio muted, subtitle text replaced |
+| `drugs` | `mute` + soften | Same |
+| `sex` | `mute` + soften | Visual matches also trigger `cut` |
+| `nudity` | `cut` | Visual-only (NudeNet, VLM) |
+| `violence` | `keep` | Off by default — fight scenes preserved |
 
-Override per-category: `--action profanity=cut`, `--enable-category violence`, etc.
+Actions: `mute` (silence audio, keep video), `cut` (remove segment entirely), `keep` (no-op).
+
+---
+
+## EDL format
+
+The `.edl.json` file is human-readable JSON. You can edit it directly before rendering.
+
+```json
+{
+  "video_path": "/path/to/movie.mp4",
+  "subtitle_path": "/path/to/movie.whisper.srt",
+  "decisions": [
+    {
+      "start": 312.4,
+      "end": 315.1,
+      "action": "mute",
+      "category": "profanity",
+      "reason": "wordlist: fuck (strong)",
+      "text_before": "What the fuck are you doing?",
+      "text_after": "What the frick are you doing?",
+      "source": "subtitle+whisper",
+      "accepted": true
+    },
+    {
+      "start": 3742.0,
+      "end": 3798.5,
+      "action": "cut",
+      "category": "nudity",
+      "reason": "NudeNet: EXPOSED_BREAST_F (0.94) corroborated by AST: moaning",
+      "text_before": "",
+      "text_after": "",
+      "source": "visual+audio",
+      "accepted": true
+    }
+  ]
+}
+```
+
+Fields:
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `start` / `end` | float | Seconds from start of video |
+| `action` | string | `"mute"`, `"cut"`, or `"keep"` |
+| `category` | string | `"profanity"`, `"drugs"`, `"sex"`, `"nudity"`, `"violence"` |
+| `reason` | string | Human-readable explanation with signal + confidence |
+| `text_before` | string | Original subtitle text (empty for visual-only cuts) |
+| `text_after` | string | Softened replacement text |
+| `source` | string | Which signals fired, joined by `+` |
+| `accepted` | bool | Set to `false` during review to suppress the cut |
+
+---
 
 ## Caching
 
-All heavy computations cache to `~/.cache/cleancut/` keyed by video + config:
+All heavy computations cache to `~/.cache/cleancut/` keyed by video file (mtime + size) and config. Cached results are automatically reused on re-runs:
 
-- **Whisper transcripts** — pass `--save-transcript FILE` once, then `--subs FILE` on re-runs
-- **PySceneDetect shot boundaries** — auto-cached, ~5-10 min savings per re-run
-- **NudeNet visual scan results** — auto-cached, ~10-30 min savings
-- **Audio event detection** — auto-cached, ~5-10 min savings
+| Stage | Cache type | Time saved |
+|-------|-----------|-----------|
+| Whisper transcript | Pass `--save-transcript FILE` once; use `--subs FILE` on re-runs | 20–35 min |
+| PySceneDetect shot boundaries | Auto-cached | 5–10 min |
+| NudeNet visual scan | Auto-cached | 10–30 min |
+| AST audio events | Auto-cached | 5–10 min |
 
-Invalidated automatically when the video file changes (mtime/size) or relevant config changes.
+Cache is invalidated automatically when the video file changes (mtime or size).
+
+---
+
+## Troubleshooting
+
+**Whisper takes forever / runs out of memory**
+Use a smaller model via `--preset balanced` (small) or `--preset fast` (base), or pre-generate the transcript once and reuse it with `--subs`.
+
+**LLaVA / LLM not running**
+Ensure `ollama serve` is running (`ps aux | grep ollama`). Pull the models if missing:
+```bash
+ollama pull llama3.1:8b
+ollama pull llava:7b
+```
+
+**"libass not found" warning**
+Subtitles fall back to a soft (non-burned) track automatically. To enable burn-in, install ffmpeg with libass:
+```bash
+brew install ffmpeg   # Homebrew's ffmpeg includes libass
+```
+
+**False positives (cuts you didn't want)**
+Run `cleancut review EDL` and reject them with `n`. Then check if a wordlist pattern is too broad — weak patterns in `wordlists.json` should cover most ambiguous cases.
+
+**False negatives (scenes not caught)**
+Use `cleancut add-cut` to manually insert a cut, then check whether the signal that should have caught it was enabled in your preset.
+
+---
 
 ## Legal
 
-The Family Movie Act of 2005 (US) permits private home performance of filtered authorized copies of motion pictures. cleancut is a tool for personal use on media you own. Don't redistribute the cleaned output.
+The [Family Movie Act of 2005](https://en.wikipedia.org/wiki/Family_Movie_Act) (US) permits private home performance of filtered authorized copies of motion pictures. cleancut is intended for **personal use on media you own**. Do not redistribute cleaned output.
+
+---
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE) for details.
