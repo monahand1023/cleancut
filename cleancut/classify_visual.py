@@ -125,7 +125,9 @@ def _extract_frame(video: Path, t: float, tmp_dir: Path) -> Path | None:
     if not shutil.which("ffmpeg"):
         raise RuntimeError("ffmpeg not found on PATH.")
     out = tmp_dir / f"frame_{int(t * 1000)}.jpg"
-    h = int(t // 3600); m = int((t % 3600) // 60); s = t - h * 3600 - m * 60
+    h = int(t // 3600)
+    m = int((t % 3600) // 60)
+    s = t - h * 3600 - m * 60
     timestamp = f"{h:02d}:{m:02d}:{s:06.3f}"
     try:
         subprocess.run(

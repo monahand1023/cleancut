@@ -9,7 +9,6 @@ from cleancut.config import Config
 from cleancut.edl import EditDecisionList
 from cleancut.probe import (
     Stream,
-    audio_streams,
     find_sidecar_subtitle,
     pick_audio_track,
     pick_embedded_subtitle,

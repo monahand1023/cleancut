@@ -8,7 +8,7 @@ from rich.console import Console
 
 from cleancut.config import Config
 from cleancut.edl import EditDecisionList
-from cleancut.pipeline import PipelineOptions, build_edl, render, run_full
+from cleancut.pipeline import PipelineOptions, build_edl, run_full
 from cleancut.probe import (
     audio_streams,
     find_sidecar_subtitle,
@@ -297,7 +297,7 @@ def cmd_add_cut(args) -> int:
     start = parse_timestamp(args.start)
     end = parse_timestamp(args.end)
     if end <= start:
-        console.print(f"[red]end must be > start[/red]")
+        console.print("[red]end must be > start[/red]")
         return 1
 
     if args.snap:
@@ -346,7 +346,6 @@ def cmd_add_cut(args) -> int:
 
 
 def cmd_review(args) -> int:
-    import json
     import subprocess
     from cleancut.edl_ops import fmt_timestamp
 
@@ -390,11 +389,12 @@ def cmd_review(args) -> int:
         f"[yellow]q[/yellow]=save and quit, [white]o[/white]=open frame)"
     )
 
-    edl_index_by_id = {id(d): i for i, d in enumerate(edl.decisions)}
     for i, d in enumerate(cuts, 1):
         # Extract frame
         t = d.start + d.duration / 2.0
-        h = int(t // 3600); m = int((t % 3600) // 60); sec = t - h * 3600 - m * 60
+        h = int(t // 3600)
+        m = int((t % 3600) // 60)
+        sec = t - h * 3600 - m * 60
         ts = f"{h:02d}:{m:02d}:{sec:06.3f}"
         frame = out_dir / f"cut_{i:02d}.jpg"
         subprocess.run(
@@ -406,7 +406,8 @@ def cmd_review(args) -> int:
         lines = []
         for s in subs:
             if s.start < d.end and s.end > d.start:
-                m_ = int(s.start // 60); s_ = s.start - m_ * 60
+                m_ = int(s.start // 60)
+                s_ = s.start - m_ * 60
                 lines.append(f"      [{m_}:{s_:05.2f}] {s.text.strip()}")
 
         console.print()

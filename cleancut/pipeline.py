@@ -10,7 +10,6 @@ from rich.console import Console
 from cleancut.config import Config
 from cleancut.edl import EditDecision, EditDecisionList
 from cleancut.editor import (
-    Range,
     adjust_subtitles_for_cuts,
     apply_cuts,
     apply_mutes_and_subs,

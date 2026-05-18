@@ -8,7 +8,7 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from cleancut.edl import EditDecision, EditDecisionList
+from cleancut.edl import EditDecisionList
 from cleancut.subtitles import Subtitle
 
 
