@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -237,8 +238,7 @@ def apply_mutes_and_subs(
     safe_dir: Path | None = None
     if can_burn:
         import shutil as _sh
-        safe_dir = Path("/tmp/cleancut-render")
-        safe_dir.mkdir(parents=True, exist_ok=True)
+        safe_dir = Path(tempfile.mkdtemp(prefix="cleancut-render_"))
         safe_srt = safe_dir / "subs.srt"
         _sh.copy(str(srt_path), str(safe_srt))
         cmd += ["-vf", "subtitles=subs.srt"]

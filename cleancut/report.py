@@ -192,7 +192,7 @@ def build_results_report(
     lines.append(f"  Cuts:            {n_cut}  ({_fmt_duration(t_cut)} of video)")
     if original_duration:
         new_dur = max(0.0, original_duration - t_cut)
-        pct = (t_cut / original_duration * 100) if original_duration else 0
+        pct = (t_cut / original_duration * 100) if original_duration > 0 else 0.0
         lines.append(
             f"  Original length: {_fmt_duration(original_duration)}  "
             f"→ after cuts: {_fmt_duration(new_dur)}  ({pct:.1f}% removed)"

@@ -7,6 +7,12 @@ from importlib import resources
 from pathlib import Path
 from typing import Literal
 
+from cleancut.constants import (
+    DEFAULT_SCENE_THRESHOLD,
+    DEFAULT_VLM_GAPS_RADIUS,
+    DEFAULT_VISUAL_THRESHOLD,
+)
+
 Category = Literal["profanity", "drugs", "sex", "violence", "nudity"]
 Action = Literal["mute", "cut", "keep"]
 
@@ -81,13 +87,13 @@ class Config:
     visual_sample_seconds: float = 1.0
     # NudeNet confidence threshold for explicit-class detections.
     # 0.7 chosen after testing — 0.55 fired on shirtless men in action films.
-    visual_threshold: float = 0.7
+    visual_threshold: float = DEFAULT_VISUAL_THRESHOLD
     # Streak mode: require this many consecutive flagged samples to cut.
     visual_min_streak: int = 3
     # Shot-aware mode: fraction of sampled frames within a shot that must hit.
     visual_shot_hit_fraction: float = 0.5
     # Scene detection threshold for PySceneDetect ContentDetector. Lower = more cuts.
-    scene_threshold: float = 27.0
+    scene_threshold: float = DEFAULT_SCENE_THRESHOLD
     # Snap dialogue cuts outward to nearest shot boundary when scenes are available.
     snap_cuts_to_scenes: bool = True
     # Pad mute/cut ranges by this many seconds on each side so cuts feel natural.
@@ -116,7 +122,7 @@ class Config:
     vlm_stride: int = 1
     vlm_min_confidence: float = 0.55
     vlm_cut_intimate: bool = False
-    vlm_gaps_radius: float = 30.0
+    vlm_gaps_radius: float = DEFAULT_VLM_GAPS_RADIUS
     # Audio event detection (HuggingFace AST on AudioSet).
     audio_events_enabled: bool = False
     audio_events_model: str = "MIT/ast-finetuned-audioset-10-10-0.4593"

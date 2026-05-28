@@ -12,12 +12,13 @@ Runs entirely on-device. Default model: llama3.1:8b (~5GB, ~30 tok/s on M-series
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 
 from tqdm import tqdm
 
+from cleancut.constants import DEFAULT_LLM_CONFIDENCE, MAX_REASON_LENGTH
 from cleancut.edl import EditDecision, EditDecisionList
+from cleancut.llm_utils import make_ollama_client, strip_to_json
 from cleancut.subtitles import Subtitle
 
 
@@ -74,7 +75,7 @@ class LLMParams:
     chunk_max_seconds: float = 90.0      # max length of a scene chunk
     chunk_join_gap: float = 6.0          # gap between subtitle lines that breaks a chunk
     min_chunk_lines: int = 2             # skip chunks with fewer than this many lines
-    min_confidence: float = 0.6          # below this, ignore the classification
+    min_confidence: float = DEFAULT_LLM_CONFIDENCE  # below this, ignore the classification
     pad_seconds: float = 1.0
     ollama_host: str | None = None       # None = default 127.0.0.1:11434
 
@@ -115,12 +116,6 @@ def chunk_dialogue(subs: list[Subtitle], params: LLMParams) -> list[DialogueChun
     return [c for c in chunks if len(c.lines) >= params.min_chunk_lines]
 
 
-def _strip_to_json(text: str) -> str:
-    """Extract the first JSON object from a possibly chatty LLM response."""
-    m = re.search(r"\{.*\}", text, re.DOTALL)
-    return m.group(0) if m else text
-
-
 def _classify_one(client, params: LLMParams, chunk: DialogueChunk) -> dict | None:
     """Send a single chunk to Ollama; return parsed JSON or None on failure."""
     prompt = (
@@ -139,7 +134,7 @@ def _classify_one(client, params: LLMParams, chunk: DialogueChunk) -> dict | Non
             options={"temperature": 0.0, "num_ctx": 4096},
         )
         text = resp["message"]["content"]
-        return json.loads(_strip_to_json(text))
+        return json.loads(strip_to_json(text))
     except Exception:
         return None
 
@@ -147,7 +142,7 @@ def _classify_one(client, params: LLMParams, chunk: DialogueChunk) -> dict | Non
 def classify_dialogue(subs: list[Subtitle], params: LLMParams) -> EditDecisionList:
     """Classify every dialogue chunk; emit cut decisions for flagged scenes."""
     try:
-        import ollama
+        import ollama  # noqa: F401
     except ImportError as e:
         raise RuntimeError(
             "LLM classifier requires the ollama python client. "
@@ -158,7 +153,7 @@ def classify_dialogue(subs: list[Subtitle], params: LLMParams) -> EditDecisionLi
     if not chunks:
         return EditDecisionList()
 
-    client = ollama.Client(host=params.ollama_host) if params.ollama_host else ollama.Client()
+    client = make_ollama_client(params.ollama_host)
 
     # Warm-load the model so first-chunk latency doesn't break the tqdm ETA.
     try:
@@ -188,7 +183,7 @@ def classify_dialogue(subs: list[Subtitle], params: LLMParams) -> EditDecisionLi
                 end=chunk.end + params.pad_seconds,
                 action="cut",
                 category=category if category != "multi" else "sex+drugs",
-                reason=f"LLM ({params.model}): {result.get('reasoning', '')[:140]}",
+                reason=f"LLM ({params.model}): {result.get('reasoning', '')[:MAX_REASON_LENGTH]}",
                 source="llm-dialogue",
             )
         )

@@ -1,29 +1,28 @@
 """Tests for the JSON-stripping helpers in classify_dialogue and classify_visual."""
 
-from cleancut.classify_dialogue import _strip_to_json as strip_dialogue
 from cleancut.classify_visual import _flagged_categories, VLMParams
-from cleancut.classify_visual import _strip_to_json as strip_visual
+from cleancut.llm_utils import strip_to_json
 
 
 def test_strip_dialogue_handles_clean_json():
     s = '{"category": "drugs", "should_cut": true}'
-    assert strip_dialogue(s) == s
+    assert strip_to_json(s) == s
 
 
 def test_strip_dialogue_handles_chatty_prefix():
     s = 'Sure! Here is the result:\n{"category": "drugs"}\nLet me know if you need more.'
-    assert strip_dialogue(s) == '{"category": "drugs"}'
+    assert strip_to_json(s) == '{"category": "drugs"}'
 
 
 def test_strip_dialogue_handles_no_json():
     s = "Just text, no json"
     # Falls back to the input
-    assert strip_dialogue(s) == s
+    assert strip_to_json(s) == s
 
 
 def test_strip_visual_handles_clean_json():
     s = '{"explicit": false}'
-    assert strip_visual(s) == s
+    assert strip_to_json(s) == s
 
 
 def test_flagged_categories_multi_signal():

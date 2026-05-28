@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import argparse
 import sys
+import tempfile
 from pathlib import Path
 
 from rich.console import Console
 
 from cleancut.config import Config
+from cleancut.constants import DEFAULT_SCENE_THRESHOLD, MAX_REASON_LENGTH
 from cleancut.edl import EditDecisionList
 from cleancut.pipeline import PipelineOptions, build_edl, run_full
 from cleancut.probe import (
@@ -20,12 +22,50 @@ from cleancut.report import build_plan, build_results_report, write_report
 
 console = Console()
 
+# Simple arg-to-config mappings: (argparse_dest, config_attribute).
+# These are pure pass-through — if the arg value is not None (or truthy), copy it directly.
+_SIMPLE_ARG_MAP: list[tuple[str, str]] = [
+    ("whisper_model", "whisper_model"),
+    ("whisper_device", "whisper_device"),
+    ("whisper_language", "whisper_language"),
+    ("visual_threshold", "visual_threshold"),
+    ("visual_sample_seconds", "visual_sample_seconds"),
+    ("visual_min_streak", "visual_min_streak"),
+    ("visual_shot_hit_fraction", "visual_shot_hit_fraction"),
+    ("scene_threshold", "scene_threshold"),
+    ("encoder", "encoder"),
+    ("quality", "quality"),
+    ("density", "density_enabled"),
+    ("density_window", "density_window_seconds"),
+    ("density_min_events", "density_min_events"),
+    ("llm", "llm_enabled"),
+    ("llm_model", "llm_model"),
+    ("llm_host", "llm_host"),
+    ("llm_min_confidence", "llm_min_confidence"),
+    ("vlm", "vlm_enabled"),
+    ("vlm_model", "vlm_model"),
+    ("vlm_mode", "vlm_mode"),
+    ("vlm_stride", "vlm_stride"),
+    ("vlm_min_confidence", "vlm_min_confidence"),
+    ("vlm_gaps_radius", "vlm_gaps_radius"),
+    ("audio_events", "audio_events_enabled"),
+    ("audio_events_threshold", "audio_events_threshold"),
+    ("corroboration_radius", "corroboration_radius_seconds"),
+]
 
-def _apply_common(args, config: Config) -> None:
+
+def _apply_common(args: argparse.Namespace, config: "Config") -> None:
     # Preset goes first so per-flag overrides take precedence.
     if getattr(args, "preset", None):
         config.apply_preset(args.preset)
 
+    # Simple pass-through mappings.
+    for arg_name, cfg_attr in _SIMPLE_ARG_MAP:
+        val = getattr(args, arg_name, None)
+        if val is not None:
+            setattr(config, cfg_attr, val)
+
+    # Special transformations that can't be expressed as simple pass-through.
     if args.wordlists:
         config.override_wordlists(Path(args.wordlists))
     if args.replacements:
@@ -43,66 +83,14 @@ def _apply_common(args, config: Config) -> None:
         if action not in ("mute", "cut", "keep"):
             raise SystemExit(f"action must be mute|cut|keep, got {action!r}")
         config.actions[cat] = action  # type: ignore[assignment]
-    if args.whisper_model:
-        config.whisper_model = args.whisper_model
-    if args.whisper_device:
-        config.whisper_device = args.whisper_device
-    if args.whisper_language:
-        config.whisper_language = args.whisper_language
     if args.no_word_timestamps:
         config.whisper_word_timestamps = False
-    if args.visual_threshold is not None:
-        config.visual_threshold = args.visual_threshold
-    if args.visual_sample_seconds is not None:
-        config.visual_sample_seconds = args.visual_sample_seconds
-    if args.visual_min_streak is not None:
-        config.visual_min_streak = args.visual_min_streak
-    if args.visual_shot_hit_fraction is not None:
-        config.visual_shot_hit_fraction = args.visual_shot_hit_fraction
-    if args.scene_threshold is not None:
-        config.scene_threshold = args.scene_threshold
     if args.no_snap_to_scenes:
         config.snap_cuts_to_scenes = False
-    if args.encoder:
-        config.encoder = args.encoder
-    if args.quality is not None:
-        config.quality = args.quality
-    if args.density is not None:
-        config.density_enabled = args.density
-    if args.density_window is not None:
-        config.density_window_seconds = args.density_window
-    if args.density_min_events is not None:
-        config.density_min_events = args.density_min_events
-    if args.llm is not None:
-        config.llm_enabled = args.llm
-    if args.llm_model:
-        config.llm_model = args.llm_model
-    if args.llm_host:
-        config.llm_host = args.llm_host
-    if args.llm_min_confidence is not None:
-        config.llm_min_confidence = args.llm_min_confidence
-    if args.vlm is not None:
-        config.vlm_enabled = args.vlm
-    if args.vlm_model:
-        config.vlm_model = args.vlm_model
-    if args.vlm_mode:
-        config.vlm_mode = args.vlm_mode
-    if args.vlm_stride is not None:
-        config.vlm_stride = args.vlm_stride
-    if args.vlm_min_confidence is not None:
-        config.vlm_min_confidence = args.vlm_min_confidence
     if args.vlm_cut_intimate:
         config.vlm_cut_intimate = True
-    if args.vlm_gaps_radius is not None:
-        config.vlm_gaps_radius = args.vlm_gaps_radius
-    if args.audio_events is not None:
-        config.audio_events_enabled = args.audio_events
-    if args.audio_events_threshold is not None:
-        config.audio_events_threshold = args.audio_events_threshold
     if args.allow_solo_visual:
         config.require_visual_corroboration = False
-    if args.corroboration_radius is not None:
-        config.corroboration_radius_seconds = args.corroboration_radius
     # Track / language selection is on the PipelineOptions, not Config.
 
 
@@ -304,7 +292,7 @@ def cmd_add_cut(args) -> int:
         try:
             video = Path(edl.video_path) if edl.video_path else None
             if video and video.exists():
-                shots = detect_shots(video, threshold=27.0)
+                shots = detect_shots(video, threshold=DEFAULT_SCENE_THRESHOLD)
                 from cleancut.scenes import snap_range_to_shots
                 ns, ne = snap_range_to_shots(start, end, shots)
                 console.print(
@@ -379,7 +367,7 @@ def cmd_review(args) -> int:
         console.print("[yellow]No cuts to review.[/yellow]")
         return 0
 
-    out_dir = Path(args.frames_dir) if args.frames_dir else Path("/tmp/cleancut_review")
+    out_dir = Path(args.frames_dir) if args.frames_dir else Path(tempfile.mkdtemp(prefix="cleancut_review_"))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     console.print(
@@ -417,7 +405,7 @@ def cmd_review(args) -> int:
             f"({d.duration:.1f}s)  [cyan]{d.category}[/cyan]  "
             f"[white]via {d.source}[/white]"
         )
-        console.print(f"  reason: {d.reason[:160]}")
+        console.print(f"  reason: {d.reason[:MAX_REASON_LENGTH]}")
         if lines:
             console.print("  dialogue:")
             for ln in lines[:10]:
@@ -447,7 +435,11 @@ def cmd_review(args) -> int:
                 return 0
             if ans.startswith("t "):
                 try:
-                    _, new_s, new_e = ans.split(maxsplit=2)
+                    parts = ans.split(maxsplit=2)
+                    if len(parts) < 3:
+                        console.print("[red]Expected: t START END[/red]")
+                        continue
+                    _, new_s, new_e = parts
                     from cleancut.edl_ops import parse_timestamp
                     d.start = parse_timestamp(new_s)
                     d.end = parse_timestamp(new_e)

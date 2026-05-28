@@ -12,7 +12,6 @@ Runs locally via Ollama. Default model: llava:7b (~5GB, ~2-4s per frame on M-ser
 from __future__ import annotations
 
 import json
-import re
 import shutil
 import subprocess
 import tempfile
@@ -21,7 +20,14 @@ from pathlib import Path
 
 from tqdm import tqdm
 
+from cleancut.constants import (
+    DEFAULT_VLM_CONFIDENCE,
+    DEFAULT_VLM_GAPS_RADIUS,
+    DEFAULT_VLM_MIN_SHOT_DURATION,
+    MAX_REASON_LENGTH,
+)
 from cleancut.edl import EditDecision, EditDecisionList
+from cleancut.llm_utils import make_ollama_client, strip_to_json
 from cleancut.scenes import Shot
 from cleancut.subtitles import Subtitle
 
@@ -57,11 +63,11 @@ class VLMParams:
     mode: str = "silent+gaps"
     stride: int = 1
     # Adjacent-shot search radius for "gaps" mode (in seconds).
-    gaps_radius_seconds: float = 30.0
+    gaps_radius_seconds: float = DEFAULT_VLM_GAPS_RADIUS
     # Skip shots shorter than this — they're usually transitions.
-    min_shot_duration: float = 0.4
+    min_shot_duration: float = DEFAULT_VLM_MIN_SHOT_DURATION
     # Confidence threshold.
-    min_confidence: float = 0.55
+    min_confidence: float = DEFAULT_VLM_CONFIDENCE
     # Categories to consider a cut. "intimate" is borderline; off by default,
     # but turned on by `--vlm-cut-intimate`.
     cut_on: tuple[str, ...] = ("explicit", "drug_use", "violence")
@@ -145,11 +151,6 @@ def _extract_frame(video: Path, t: float, tmp_dir: Path) -> Path | None:
         return None
 
 
-def _strip_to_json(text: str) -> str:
-    m = re.search(r"\{.*\}", text, re.DOTALL)
-    return m.group(0) if m else text
-
-
 def _classify_frame(client, params: VLMParams, frame_path: Path) -> dict | None:
     try:
         resp = client.chat(
@@ -166,7 +167,7 @@ def _classify_frame(client, params: VLMParams, frame_path: Path) -> dict | None:
             options={"temperature": 0.0},
         )
         text = resp["message"]["content"]
-        return json.loads(_strip_to_json(text))
+        return json.loads(strip_to_json(text))
     except Exception:
         return None
 
@@ -189,7 +190,7 @@ def _flagged_categories(result: dict, params: VLMParams) -> list[str]:
     return cats
 
 
-def scan_video(
+def scan_with_vlm(
     video: Path,
     shots: list[Shot],
     subs: list[Subtitle],
@@ -198,7 +199,7 @@ def scan_video(
 ) -> EditDecisionList:
     """Run VLM over a selected subset of shots; emit cuts for flagged shots."""
     try:
-        import ollama
+        import ollama  # noqa: F401
     except ImportError as e:
         raise RuntimeError(
             "VLM classifier requires the ollama python client. "
@@ -209,7 +210,7 @@ def scan_video(
     if not targets:
         return EditDecisionList()
 
-    client = ollama.Client(host=params.ollama_host) if params.ollama_host else ollama.Client()
+    client = make_ollama_client(params.ollama_host)
     # Warm-load the model.
     try:
         client.generate(model=params.model, prompt="ok", options={"num_predict": 1})
@@ -229,7 +230,7 @@ def scan_video(
             if not cats:
                 continue
             category = "+".join(cats)
-            desc = (result or {}).get("description", "")[:140]
+            desc = (result or {}).get("description", "")[:MAX_REASON_LENGTH]
             edl.add(
                 EditDecision(
                     start=shot.start,

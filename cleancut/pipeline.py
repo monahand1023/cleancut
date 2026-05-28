@@ -282,7 +282,7 @@ def build_edl(opts: PipelineOptions, config: Config) -> tuple[EditDecisionList, 
     # VLM visual scene classification — closes the gap on silent scenes.
     if config.vlm_enabled and shots:
         try:
-            from cleancut.classify_visual import VLMParams, scan_video as vlm_scan
+            from cleancut.classify_visual import VLMParams, scan_with_vlm as vlm_scan
             cut_on = ("intimate", "explicit", "drug_use", "violence") if config.vlm_cut_intimate \
                 else ("explicit", "drug_use", "violence")
             console.print(
