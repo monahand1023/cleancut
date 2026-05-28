@@ -44,3 +44,7 @@ models/
 # Editor state
 *.edl.json
 !examples/*.edl.json
+
+# Local secrets — never commit
+.env
+.env.local
