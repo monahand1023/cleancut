@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable
+
+if TYPE_CHECKING:
+    from cleancut.scenes import Shot
 
 
 @dataclass
@@ -126,3 +129,34 @@ class EditDecisionList:
             key = f"{d.action}:{d.category.split('+')[0]}"
             out[key] = out.get(key, 0) + 1
         return out
+
+
+def snap_edl_to_shots(edl: EditDecisionList, shots: list["Shot"]) -> EditDecisionList:
+    """Extend each `cut` decision outward to enclosing shot boundaries.
+
+    Mutes are left alone — they're audio-only and should be word-precise.
+    """
+    if not shots:
+        return edl
+    from cleancut.scenes import snap_range_to_shots
+
+    out: list[EditDecision] = []
+    for d in edl.decisions:
+        if d.action == "cut":
+            ns, ne = snap_range_to_shots(d.start, d.end, shots)
+            out.append(
+                EditDecision(
+                    start=ns,
+                    end=ne,
+                    action=d.action,
+                    category=d.category,
+                    reason=(d.reason + " | snapped-to-shot").strip(" |"),
+                    text_before=d.text_before,
+                    text_after=d.text_after,
+                    source=d.source,
+                    accepted=d.accepted,
+                )
+            )
+        else:
+            out.append(d)
+    return EditDecisionList(decisions=out, video_path=edl.video_path, subtitle_path=edl.subtitle_path)

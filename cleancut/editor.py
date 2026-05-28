@@ -1,4 +1,8 @@
-"""ffmpeg orchestration: apply cuts, mutes, and burned subtitles."""
+"""ffmpeg orchestration: apply cuts, mutes, and burned subtitles.
+
+Range/EDL arithmetic lives in editor_ranges; the public names are re-exported
+here so existing callers (pipeline.py, cli.py, tests) need no changes.
+"""
 
 from __future__ import annotations
 
@@ -6,11 +10,20 @@ import json
 import shutil
 import subprocess
 import tempfile
-from dataclasses import dataclass
 from pathlib import Path
 
 from cleancut.edl import EditDecisionList
-from cleancut.subtitles import Subtitle
+
+# Re-export all pure-arithmetic names from editor_ranges so any code that
+# does `from cleancut.editor import Range, keep_segments, …` keeps working.
+from cleancut.editor_ranges import (  # noqa: F401
+    Range,
+    adjust_subtitles_for_cuts,
+    edl_to_ranges,
+    keep_segments,
+    shift_after_cuts,
+    shift_ranges_after_cuts,
+)
 
 
 def _require_ffmpeg() -> None:
@@ -30,108 +43,6 @@ def probe_duration(path: Path) -> float:
         ]
     )
     return float(json.loads(out)["format"]["duration"])
-
-
-@dataclass
-class Range:
-    start: float
-    end: float
-
-    @property
-    def duration(self) -> float:
-        return max(0.0, self.end - self.start)
-
-
-def keep_segments(duration: float, cuts: list[Range]) -> list[Range]:
-    """Complement of cuts within [0, duration]. Returns the segments we keep."""
-    cuts = sorted(cuts, key=lambda r: r.start)
-    kept: list[Range] = []
-    cursor = 0.0
-    for c in cuts:
-        s = max(c.start, 0.0)
-        e = min(c.end, duration)
-        if e <= cursor:
-            continue
-        if s > cursor:
-            kept.append(Range(cursor, s))
-        cursor = max(cursor, e)
-    if cursor < duration:
-        kept.append(Range(cursor, duration))
-    return [r for r in kept if r.duration > 0.001]
-
-
-def shift_after_cuts(t: float, cuts: list[Range]) -> float | None:
-    """Map a source-timeline timestamp to the cut-output timeline.
-
-    Returns None if `t` falls inside a removed segment.
-    """
-    out = t
-    for c in sorted(cuts, key=lambda r: r.start):
-        if c.start >= t:
-            break
-        if c.start <= t <= c.end:
-            return None
-        out -= c.duration
-    return max(0.0, out)
-
-
-def adjust_subtitles_for_cuts(
-    subs: list[Subtitle], cuts: list[Range]
-) -> list[Subtitle]:
-    """Shift / trim / drop subtitles to match a video with the given cuts removed."""
-    if not cuts:
-        return list(subs)
-    cuts = sorted(cuts, key=lambda r: r.start)
-    out: list[Subtitle] = []
-    next_idx = 1
-    for s in subs:
-        new_start = shift_after_cuts(s.start, cuts)
-        new_end = shift_after_cuts(s.end, cuts)
-        # Both endpoints fall inside cuts -> drop.
-        if new_start is None and new_end is None:
-            continue
-        # Start cut out: snap to the next keep boundary.
-        if new_start is None:
-            for c in cuts:
-                if c.start <= s.start <= c.end:
-                    snapped = shift_after_cuts(c.end + 1e-4, cuts) or 0.0
-                    new_start = snapped
-                    break
-        if new_end is None:
-            for c in cuts:
-                if c.start <= s.end <= c.end:
-                    snapped = shift_after_cuts(c.start - 1e-4, cuts)
-                    new_end = snapped if snapped is not None else new_start
-                    break
-        if new_start is None or new_end is None or new_end <= new_start:
-            continue
-        out.append(Subtitle(index=next_idx, start=new_start, end=new_end, text=s.text))
-        next_idx += 1
-    return out
-
-
-def shift_ranges_after_cuts(ranges: list[Range], cuts: list[Range]) -> list[Range]:
-    """Map mute ranges from source timeline to cut-output timeline."""
-    out: list[Range] = []
-    for r in ranges:
-        ns = shift_after_cuts(r.start, cuts)
-        ne = shift_after_cuts(r.end, cuts)
-        if ns is None and ne is None:
-            continue
-        if ns is None:
-            ns = 0.0
-        if ne is None:
-            # Range tail falls inside a cut: trim to the cut boundary.
-            for c in sorted(cuts, key=lambda x: x.start):
-                if c.start <= r.end <= c.end:
-                    snapped = shift_after_cuts(c.start - 1e-4, cuts)
-                    if snapped is not None:
-                        ne = snapped
-                    break
-        if ne is None or ne <= ns:
-            continue
-        out.append(Range(ns, ne))
-    return out
 
 
 def _video_encoder_args(encoder: str, quality: int) -> list[str]:
@@ -237,26 +148,26 @@ def apply_mutes_and_subs(
 
     safe_dir: Path | None = None
     if can_burn:
-        import shutil as _sh
         safe_dir = Path(tempfile.mkdtemp(prefix="cleancut-render_"))
-        safe_srt = safe_dir / "subs.srt"
-        _sh.copy(str(srt_path), str(safe_srt))
-        cmd += ["-vf", "subtitles=subs.srt"]
-        cmd += _video_encoder_args(encoder, quality)
-    elif has_soft_subs:
-        # Stream-copy video, encode subs as mov_text into the MP4 container.
-        cmd += ["-map", "0:v", "-map", "0:a", "-map", "1:0"]
-        cmd += ["-c:v", "copy"]
-        cmd += ["-c:s", "mov_text"]
-        cmd += ["-metadata:s:s:0", "language=eng",
-                "-metadata:s:s:0", "title=cleancut (softened)"]
-    else:
-        cmd += ["-c:v", "copy"]
+    try:
+        if can_burn:
+            safe_srt = safe_dir / "subs.srt"
+            shutil.copy(str(srt_path), str(safe_srt))
+            cmd += ["-vf", "subtitles=subs.srt"]
+            cmd += _video_encoder_args(encoder, quality)
+        elif has_soft_subs:
+            # Stream-copy video, encode subs as mov_text into the MP4 container.
+            cmd += ["-map", "0:v", "-map", "0:a", "-map", "1:0"]
+            cmd += ["-c:v", "copy"]
+            cmd += ["-c:s", "mov_text"]
+            cmd += ["-metadata:s:s:0", "language=eng",
+                    "-metadata:s:s:0", "title=cleancut (softened)"]
+        else:
+            cmd += ["-c:v", "copy"]
 
-    cmd += ["-c:a", "aac", "-b:a", "192k", str(output_path)]
-    cwd = str(safe_dir) if can_burn else None
-    subprocess.run(cmd, check=True, cwd=cwd)
-
-
-def edl_to_ranges(edl: EditDecisionList, action: str) -> list[Range]:
-    return [Range(d.start, d.end) for d in edl.by_action(action)]
+        cmd += ["-c:a", "aac", "-b:a", "192k", str(output_path)]
+        cwd = str(safe_dir) if can_burn else None
+        subprocess.run(cmd, check=True, cwd=cwd)
+    finally:
+        if safe_dir is not None:
+            shutil.rmtree(safe_dir, ignore_errors=True)

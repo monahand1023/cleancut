@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 import tempfile
 from pathlib import Path
@@ -367,94 +368,103 @@ def cmd_review(args) -> int:
         console.print("[yellow]No cuts to review.[/yellow]")
         return 0
 
-    out_dir = Path(args.frames_dir) if args.frames_dir else Path(tempfile.mkdtemp(prefix="cleancut_review_"))
+    _tmp_dir: str | None = None
+    if args.frames_dir:
+        out_dir = Path(args.frames_dir)
+    else:
+        _tmp_dir = tempfile.mkdtemp(prefix="cleancut_review_")
+        out_dir = Path(_tmp_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    console.print(
-        f"[bold]Reviewing {len(cuts)} cut(s)[/bold]   "
-        f"(commands: [green]y[/green]=keep, [red]n[/red]=reject, "
-        f"[cyan]t START END[/cyan]=trim, [magenta]s[/magenta]=skip, "
-        f"[yellow]q[/yellow]=save and quit, [white]o[/white]=open frame)"
-    )
-
-    for i, d in enumerate(cuts, 1):
-        # Extract frame
-        t = d.start + d.duration / 2.0
-        h = int(t // 3600)
-        m = int((t % 3600) // 60)
-        sec = t - h * 3600 - m * 60
-        ts = f"{h:02d}:{m:02d}:{sec:06.3f}"
-        frame = out_dir / f"cut_{i:02d}.jpg"
-        subprocess.run(
-            ["ffmpeg", "-y", "-v", "error", "-ss", ts, "-i", str(video),
-             "-frames:v", "1", "-q:v", "3", str(frame)],
-            check=False,
-        )
-        # Dialogue
-        lines = []
-        for s in subs:
-            if s.start < d.end and s.end > d.start:
-                m_ = int(s.start // 60)
-                s_ = s.start - m_ * 60
-                lines.append(f"      [{m_}:{s_:05.2f}] {s.text.strip()}")
-
-        console.print()
+    try:
         console.print(
-            f"[bold]Cut {i}/{len(cuts)}[/bold]  "
-            f"{fmt_timestamp(d.start)} → {fmt_timestamp(d.end)}  "
-            f"({d.duration:.1f}s)  [cyan]{d.category}[/cyan]  "
-            f"[white]via {d.source}[/white]"
+            f"[bold]Reviewing {len(cuts)} cut(s)[/bold]   "
+            f"(commands: [green]y[/green]=keep, [red]n[/red]=reject, "
+            f"[cyan]t START END[/cyan]=trim, [magenta]s[/magenta]=skip, "
+            f"[yellow]q[/yellow]=save and quit, [white]o[/white]=open frame)"
         )
-        console.print(f"  reason: {d.reason[:MAX_REASON_LENGTH]}")
-        if lines:
-            console.print("  dialogue:")
-            for ln in lines[:10]:
-                console.print(f"  {ln}")
-            if len(lines) > 10:
-                console.print(f"      … ({len(lines) - 10} more lines)")
-        console.print(f"  frame:    {frame}")
 
-        while True:
-            ans = input("  > ").strip().lower()
-            if not ans:
-                continue
-            if ans == "y":
-                break
-            if ans == "n":
-                d.accepted = False
-                console.print("  [red]rejected[/red]")
-                break
-            if ans == "s":
-                console.print("  [yellow]skipped (no change)[/yellow]")
-                break
-            if ans == "o":
-                subprocess.run(["open", str(frame)], check=False)
-                continue
-            if ans == "q":
-                _save_review(edl, edl_path)
-                return 0
-            if ans.startswith("t "):
-                try:
-                    parts = ans.split(maxsplit=2)
-                    if len(parts) < 3:
-                        console.print("[red]Expected: t START END[/red]")
-                        continue
-                    _, new_s, new_e = parts
-                    from cleancut.edl_ops import parse_timestamp
-                    d.start = parse_timestamp(new_s)
-                    d.end = parse_timestamp(new_e)
-                    console.print(
-                        f"  [cyan]trimmed → "
-                        f"{fmt_timestamp(d.start)} → {fmt_timestamp(d.end)}[/cyan]"
-                    )
-                    break
-                except Exception as e:
-                    console.print(f"  [red]bad trim: {e}[/red]")
+        for i, d in enumerate(cuts, 1):
+            # Extract frame
+            t = d.start + d.duration / 2.0
+            h = int(t // 3600)
+            m = int((t % 3600) // 60)
+            sec = t - h * 3600 - m * 60
+            ts = f"{h:02d}:{m:02d}:{sec:06.3f}"
+            frame = out_dir / f"cut_{i:02d}.jpg"
+            subprocess.run(
+                ["ffmpeg", "-y", "-v", "error", "-ss", ts, "-i", str(video),
+                 "-frames:v", "1", "-q:v", "3", str(frame)],
+                check=False,
+            )
+            # Dialogue
+            lines = []
+            for s in subs:
+                if s.start < d.end and s.end > d.start:
+                    m_ = int(s.start // 60)
+                    s_ = s.start - m_ * 60
+                    lines.append(f"      [{m_}:{s_:05.2f}] {s.text.strip()}")
+
+            console.print()
+            console.print(
+                f"[bold]Cut {i}/{len(cuts)}[/bold]  "
+                f"{fmt_timestamp(d.start)} → {fmt_timestamp(d.end)}  "
+                f"({d.duration:.1f}s)  [cyan]{d.category}[/cyan]  "
+                f"[white]via {d.source}[/white]"
+            )
+            console.print(f"  reason: {d.reason[:MAX_REASON_LENGTH]}")
+            if lines:
+                console.print("  dialogue:")
+                for ln in lines[:10]:
+                    console.print(f"  {ln}")
+                if len(lines) > 10:
+                    console.print(f"      … ({len(lines) - 10} more lines)")
+            console.print(f"  frame:    {frame}")
+
+            while True:
+                ans = input("  > ").strip().lower()
+                if not ans:
                     continue
-            console.print("  [yellow]?[/yellow] y/n/t START END/s/o/q")
+                if ans == "y":
+                    break
+                if ans == "n":
+                    d.accepted = False
+                    console.print("  [red]rejected[/red]")
+                    break
+                if ans == "s":
+                    console.print("  [yellow]skipped (no change)[/yellow]")
+                    break
+                if ans == "o":
+                    subprocess.run(["open", str(frame)], check=False)
+                    continue
+                if ans == "q":
+                    _save_review(edl, edl_path)
+                    return 0
+                if ans.startswith("t "):
+                    try:
+                        parts = ans.split(maxsplit=2)
+                        if len(parts) < 3:
+                            console.print("[red]Expected: t START END[/red]")
+                            continue
+                        _, new_s, new_e = parts
+                        from cleancut.edl_ops import parse_timestamp
+                        d.start = parse_timestamp(new_s)
+                        d.end = parse_timestamp(new_e)
+                        console.print(
+                            f"  [cyan]trimmed → "
+                            f"{fmt_timestamp(d.start)} → {fmt_timestamp(d.end)}[/cyan]"
+                        )
+                        break
+                    except Exception as e:
+                        console.print(f"  [red]bad trim: {e}[/red]")
+                        continue
+                console.print("  [yellow]?[/yellow] y/n/t START END/s/o/q")
 
-    _save_review(edl, edl_path)
-    return 0
+        _save_review(edl, edl_path)
+        return 0
+    finally:
+        if _tmp_dir is not None:
+            shutil.rmtree(_tmp_dir, ignore_errors=True)
 
 
 def _save_review(edl: EditDecisionList, edl_path: Path) -> None:

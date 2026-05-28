@@ -8,7 +8,7 @@ from pathlib import Path
 from rich.console import Console
 
 from cleancut.config import Config
-from cleancut.edl import EditDecision, EditDecisionList
+from cleancut.edl import EditDecisionList, snap_edl_to_shots
 from cleancut.editor import (
     adjust_subtitles_for_cuts,
     apply_cuts,
@@ -16,7 +16,7 @@ from cleancut.editor import (
     edl_to_ranges,
     shift_ranges_after_cuts,
 )
-from cleancut.scenes import Shot, snap_range_to_shots
+from cleancut.scenes import Shot
 from cleancut.subtitles import (
     Subtitle,
     read_srt,
@@ -27,6 +27,19 @@ from cleancut.subtitles import (
 )
 
 console = Console()
+
+
+def _run_detector(name: str, fn, *args, **kwargs) -> list:
+    """Run a detector, returning [] and printing a warning on RuntimeError."""
+    try:
+        return fn(*args, **kwargs)
+    except RuntimeError as e:
+        console.print(f"[yellow]{name} skipped: {e}[/yellow]")
+        return []
+
+
+# Backward-compatible alias — test_pipeline_unit.py imports this from pipeline.
+_snap_edl_to_shots = snap_edl_to_shots
 
 
 @dataclass
@@ -162,35 +175,6 @@ def _detect_scenes_if_enabled(opts: PipelineOptions, config: Config) -> list[Sho
         return []
 
 
-def _snap_edl_to_shots(edl: EditDecisionList, shots: list[Shot]) -> EditDecisionList:
-    """Extend each `cut` decision outward to enclosing shot boundaries.
-
-    Mutes are left alone — they're audio-only and should be word-precise.
-    """
-    if not shots:
-        return edl
-    out: list[EditDecision] = []
-    for d in edl.decisions:
-        if d.action == "cut":
-            ns, ne = snap_range_to_shots(d.start, d.end, shots)
-            out.append(
-                EditDecision(
-                    start=ns,
-                    end=ne,
-                    action=d.action,
-                    category=d.category,
-                    reason=(d.reason + " | snapped-to-shot").strip(" |"),
-                    text_before=d.text_before,
-                    text_after=d.text_after,
-                    source=d.source,
-                    accepted=d.accepted,
-                )
-            )
-        else:
-            out.append(d)
-    return EditDecisionList(decisions=out, video_path=edl.video_path, subtitle_path=edl.subtitle_path)
-
-
 def build_edl(opts: PipelineOptions, config: Config) -> tuple[EditDecisionList, list[Subtitle]]:
     """Run all detectors and produce a merged EDL."""
     subs, words = _get_subtitles_and_words(opts, config)
@@ -209,17 +193,17 @@ def build_edl(opts: PipelineOptions, config: Config) -> tuple[EditDecisionList, 
     shots = _detect_scenes_if_enabled(opts, config)
 
     if opts.use_visual and "nudity" in config.enabled_categories:
-        try:
-            from cleancut.visual import scan_video
-            console.print(
-                f"[cyan]Visual scan[/cyan] "
-                f"({'shot-aware' if shots else 'streak mode'}, "
-                f"sample={config.visual_sample_seconds}s, "
-                f"threshold={config.visual_threshold})"
-            )
-            edl.extend(scan_video(opts.video, config, shots=shots or None).decisions)
-        except RuntimeError as e:
-            console.print(f"[yellow]Visual scan skipped: {e}[/yellow]")
+        from cleancut.visual import scan_video
+        console.print(
+            f"[cyan]Visual scan[/cyan] "
+            f"({'shot-aware' if shots else 'streak mode'}, "
+            f"sample={config.visual_sample_seconds}s, "
+            f"threshold={config.visual_threshold})"
+        )
+        visual_decisions = _run_detector(
+            "Visual scan", lambda: scan_video(opts.video, config, shots=shots or None).decisions
+        )
+        edl.extend(visual_decisions)
 
     edl = edl.pad(config.pad_seconds).merge_overlapping(gap=config.merge_gap_seconds).sorted()
 
@@ -241,71 +225,65 @@ def build_edl(opts: PipelineOptions, config: Config) -> tuple[EditDecisionList, 
 
     # LLM-based contextual dialogue classification.
     if config.llm_enabled and subs:
-        try:
-            from cleancut.classify_dialogue import LLMParams, classify_dialogue
-            console.print(f"[cyan]LLM dialogue scan[/cyan] model={config.llm_model}")
-            llm_edl = classify_dialogue(
-                subs,
-                LLMParams(
-                    model=config.llm_model,
-                    ollama_host=config.llm_host,
-                    min_confidence=config.llm_min_confidence,
-                ),
-            )
-            if len(llm_edl):
-                console.print(f"[green]LLM flagged {len(llm_edl)} scene(s)[/green]")
-                edl.extend(llm_edl.decisions)
-        except RuntimeError as e:
-            console.print(f"[yellow]LLM scan skipped: {e}[/yellow]")
+        from cleancut.classify_dialogue import LLMParams, classify_dialogue
+        console.print(f"[cyan]LLM dialogue scan[/cyan] model={config.llm_model}")
+        llm_params = LLMParams(
+            model=config.llm_model,
+            ollama_host=config.llm_host,
+            min_confidence=config.llm_min_confidence,
+        )
+        llm_edl_decisions = _run_detector(
+            "LLM scan", lambda: classify_dialogue(subs, llm_params).decisions
+        )
+        if llm_edl_decisions:
+            console.print(f"[green]LLM flagged {len(llm_edl_decisions)} scene(s)[/green]")
+            edl.extend(llm_edl_decisions)
 
     # Audio event detection (AST) — catches moans/screams/gunshots without dialogue or visible content.
     if config.audio_events_enabled and shots:
-        try:
-            from cleancut.audio_events import AudioEventParams, scan_audio_events
-            console.print(f"[cyan]Audio event scan[/cyan] model={config.audio_events_model}")
-            ae_edl = scan_audio_events(
-                opts.video, shots,
-                AudioEventParams(
-                    model=config.audio_events_model,
-                    threshold=config.audio_events_threshold,
-                    clip_seconds=config.audio_events_clip_seconds,
-                    skip_violence=config.audio_events_skip_violence,
-                ),
-                audio_track_index=None,  # use first audio track by default; CLI can override
-            )
-            if len(ae_edl):
-                console.print(f"[green]Audio events flagged {len(ae_edl)} shot(s)[/green]")
-                edl.extend(ae_edl.decisions)
-        except RuntimeError as e:
-            console.print(f"[yellow]Audio events skipped: {e}[/yellow]")
+        from cleancut.audio_events import AudioEventParams, scan_audio_events
+        console.print(f"[cyan]Audio event scan[/cyan] model={config.audio_events_model}")
+        ae_params = AudioEventParams(
+            model=config.audio_events_model,
+            threshold=config.audio_events_threshold,
+            clip_seconds=config.audio_events_clip_seconds,
+            skip_violence=config.audio_events_skip_violence,
+        )
+        ae_edl_decisions = _run_detector(
+            "Audio events",
+            lambda: scan_audio_events(
+                opts.video, shots, ae_params, audio_track_index=None,
+            ).decisions,
+        )
+        if ae_edl_decisions:
+            console.print(f"[green]Audio events flagged {len(ae_edl_decisions)} shot(s)[/green]")
+            edl.extend(ae_edl_decisions)
 
     # VLM visual scene classification — closes the gap on silent scenes.
     if config.vlm_enabled and shots:
-        try:
-            from cleancut.classify_visual import VLMParams, scan_with_vlm as vlm_scan
-            cut_on = ("intimate", "explicit", "drug_use", "violence") if config.vlm_cut_intimate \
-                else ("explicit", "drug_use", "violence")
-            console.print(
-                f"[cyan]VLM scene scan[/cyan] model={config.vlm_model} "
-                f"mode={config.vlm_mode}"
-            )
-            vlm_edl = vlm_scan(
-                opts.video, shots, subs, edl,
-                VLMParams(
-                    model=config.vlm_model,
-                    mode=config.vlm_mode,
-                    stride=config.vlm_stride,
-                    min_confidence=config.vlm_min_confidence,
-                    gaps_radius_seconds=config.vlm_gaps_radius,
-                    cut_on=cut_on,
-                    ollama_host=config.llm_host,
-                ),
-            )
-            if len(vlm_edl):
-                console.print(f"[green]VLM flagged {len(vlm_edl)} shot(s)[/green]")
-                edl.extend(vlm_edl.decisions)
-        except RuntimeError as e:
-            console.print(f"[yellow]VLM scan skipped: {e}[/yellow]")
+        from cleancut.classify_visual import VLMParams, scan_with_vlm as vlm_scan
+        cut_on = ("intimate", "explicit", "drug_use", "violence") if config.vlm_cut_intimate \
+            else ("explicit", "drug_use", "violence")
+        console.print(
+            f"[cyan]VLM scene scan[/cyan] model={config.vlm_model} "
+            f"mode={config.vlm_mode}"
+        )
+        vlm_params = VLMParams(
+            model=config.vlm_model,
+            mode=config.vlm_mode,
+            stride=config.vlm_stride,
+            min_confidence=config.vlm_min_confidence,
+            gaps_radius_seconds=config.vlm_gaps_radius,
+            cut_on=cut_on,
+            ollama_host=config.llm_host,
+        )
+        vlm_edl_decisions = _run_detector(
+            "VLM scan",
+            lambda: vlm_scan(opts.video, shots, subs, edl, vlm_params).decisions,
+        )
+        if vlm_edl_decisions:
+            console.print(f"[green]VLM flagged {len(vlm_edl_decisions)} shot(s)[/green]")
+            edl.extend(vlm_edl_decisions)
 
     # Re-merge after adding density/LLM/VLM signals.
     edl = edl.merge_overlapping(gap=config.merge_gap_seconds).sorted()
