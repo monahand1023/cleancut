@@ -5,15 +5,13 @@ All cv2, NudeNet, and cache calls are mocked so no GPU/model is needed.
 from __future__ import annotations
 
 import sys
-from pathlib import Path
-from types import ModuleType
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from cleancut.config import Config
-from cleancut.edl import EditDecision, EditDecisionList
-from cleancut.visual import EXPLICIT_CLASSES, _is_explicit
+from cleancut.edl import EditDecisionList
+from cleancut.visual import _is_explicit
 
 
 # ---------------------------------------------------------------------------

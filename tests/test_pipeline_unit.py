@@ -1,8 +1,7 @@
 """Unit tests for pipeline helpers that don't require external models."""
 from __future__ import annotations
 
-import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 from pathlib import Path
 
 from cleancut.edl import EditDecisionList, EditDecision

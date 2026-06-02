@@ -7,10 +7,8 @@ Verifies:
 """
 from __future__ import annotations
 
-from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import patch
 
-import pytest
 
 from cleancut.config import Config
 from cleancut.edl import EditDecision, EditDecisionList
@@ -291,7 +289,6 @@ class TestBuildEdlFullPipeline:
             edl, _ = build_edl(opts, config)
 
         assert len(edl.decisions) >= 1
-        all_sources = "+".join(d.source for d in edl.decisions)
         # At least one decision should exist (they might merge)
         assert edl.decisions
 

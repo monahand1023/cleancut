@@ -12,7 +12,6 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from cleancut.edl import EditDecisionList
 
 # Re-export all pure-arithmetic names from editor_ranges so any code that
 # does `from cleancut.editor import Range, keep_segments, …` keeps working.

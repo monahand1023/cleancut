@@ -6,14 +6,12 @@ no real video file or external tool is required.
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import patch
 
-import pytest
 
 from cleancut.edl import EditDecision, EditDecisionList
-from cleancut.cli import cmd_scan, cmd_clean, cmd_inspect, cmd_add_cut, cmd_review, main
+from cleancut.cli import cmd_scan, cmd_clean, cmd_inspect, cmd_add_cut, cmd_review
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +250,6 @@ class TestCmdInspect:
 
     def test_inspect_prints_plan(self, tmp_path, capsys):
         args = _inspect_args(tmp_path)
-        video = Path(args.video)
         fake_streams = [self._make_stream()]
 
         with patch("cleancut.cli.probe_streams", return_value=fake_streams), \

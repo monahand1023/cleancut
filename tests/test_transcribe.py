@@ -5,8 +5,6 @@ All Whisper and torch calls are mocked — no GPU or model download required.
 from __future__ import annotations
 
 import sys
-from pathlib import Path
-from types import ModuleType
 from unittest.mock import MagicMock, patch
 
 import pytest
