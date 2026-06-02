@@ -8,6 +8,23 @@ cleancut detects profanity, drug references, sex, and nudity using a layered sta
 
 **No cloud APIs.** All AI runs locally — Whisper for speech-to-text, Ollama-hosted LLMs for dialogue context, NudeNet + LLaVA for vision, HuggingFace AST for audio events.
 
+## How it works
+
+```mermaid
+flowchart TB
+    V["Input video"] --> A["Audio track"]
+    V --> F["Video frames"]
+    A --> W["Whisper STT<br/>transcript + timing"]
+    W --> LLM["Ollama LLM<br/>profanity · drugs · dialogue context"]
+    A --> AST["HuggingFace AST<br/>audio events"]
+    F --> VIS["NudeNet + LLaVA<br/>sex / nudity detection"]
+    LLM --> EDL["Edit Decision List<br/>(auditable — every cut is logged)"]
+    AST --> EDL
+    VIS --> EDL
+    EDL --> FF["ffmpeg<br/>mute · cut · soften subtitles"]
+    FF --> OUT["Cleaned .mp4"]
+```
+
 ---
 
 ## Contents
