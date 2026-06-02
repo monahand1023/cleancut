@@ -1,6 +1,6 @@
 # cleancut
 
-[![CI](https://github.com/monahand1023/cleancut/actions/workflows/ci.yml/badge.svg)](https://github.com/monahand1023/cleancut/actions/workflows/ci.yml)
+[![CI](https://github.com/monahand1023/cleancut/actions/workflows/ci.yml/badge.svg)](https://github.com/monahand1023/cleancut/actions/workflows/ci.yml) [![Python](https://img.shields.io/badge/python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/) [![License: MIT](https://img.shields.io/github/license/monahand1023/cleancut)](LICENSE)
 
 > Auto-edit movies for content — mutes profanity, cuts explicit scenes, softens subtitles. Runs entirely on-device.
 
