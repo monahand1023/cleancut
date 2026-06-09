@@ -50,25 +50,26 @@ flowchart TB
 
 cleancut runs a layered detection pipeline on a video file and produces an **Edit Decision List (EDL)** — a JSON file describing every proposed cut or mute. The pipeline:
 
-```
-video.mp4
-   │
-   ├─ probe          → detect audio/subtitle tracks, language
-   │
-   ├─ transcribe     → Whisper STT (if no .srt provided)
-   │
-   ├─ subtitle scan  → wordlist match + context gating
-   │   └─ density    → cluster nearby hits into "content scenes"
-   │
-   ├─ LLM dialogue   → Ollama/Llama 3.1 classifies ambiguous scenes
-   │
-   ├─ NudeNet        → frame-level explicit nudity detection
-   │
-   ├─ VLM scene      → LLaVA classifies intimate framing / paraphernalia
-   │
-   └─ Audio events   → HuggingFace AST classifies moans, screams, etc.
-
-All signals merge → EDL → (optional review) → render
+```mermaid
+flowchart TD
+    video(["video.mp4"]) --> probe["probe — detect audio/subtitle tracks, language"]
+    video --> transcribe["transcribe — Whisper STT if no .srt"]
+    video --> subscan["subtitle scan — wordlist match + context gating"]
+    subscan --> density["density — cluster nearby hits into content scenes"]
+    video --> llm["LLM dialogue — Ollama/Llama 3.1 classifies ambiguous scenes"]
+    video --> nudenet["NudeNet — frame-level explicit nudity detection"]
+    video --> vlm["VLM scene — LLaVA classifies intimate framing / paraphernalia"]
+    video --> audio["Audio events — HF AST classifies moans, screams, etc."]
+    probe --> merge["All signals merge"]
+    transcribe --> merge
+    density --> merge
+    llm --> merge
+    nudenet --> merge
+    vlm --> merge
+    audio --> merge
+    merge --> edl["EDL"]
+    edl --> review["optional review"]
+    review --> render(["render"])
 ```
 
 Each signal runs independently. Results merge into one EDL, then density clustering and snap-to-shot post-processing dedupe and align the cuts to clean shot boundaries. The report shows which signal triggered each cut, so every decision is auditable.
