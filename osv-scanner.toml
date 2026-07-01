@@ -1,0 +1,3 @@
+[[IgnoredVulns]]
+id = "GHSA-rrmf-rvhw-rf47"
+reason = "No patched torch release exists yet; vulnerable function (torch.jit.script) is not used anywhere in this codebase. See Dependabot alert #1."
