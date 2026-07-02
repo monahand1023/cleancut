@@ -25,6 +25,13 @@ visual = ["nudenet>=3.4.2", "opencv-python>=4.9.0", "numpy>=1.26.0"]
 scenes = ["scenedetect[opencv]>=0.6.4"]
 # Local LLM dialogue classification via Ollama.
 llm = ["ollama>=0.4.0"]
+# Audio event detection (HuggingFace AST).
+audio = [
+    "transformers>=4.40.0",
+    "librosa>=0.10.0",
+    "torch>=2.2.0",
+    "numpy>=1.26.0",
+]
 # Everything.
 full = [
     "openai-whisper>=20231117",
@@ -34,6 +41,8 @@ full = [
     "scenedetect[opencv]>=0.6.4",
     "torch>=2.2.0",
     "ollama>=0.4.0",
+    "transformers>=4.40.0",
+    "librosa>=0.10.0",
 ]
 dev = [
     "pytest>=8.0.0",

@@ -140,7 +140,8 @@ pip install -e .                        # subtitle-only — no STT, no visual, n
 pip install -e ".[whisper]"             # + Whisper transcription
 pip install -e ".[visual,scenes]"       # + NudeNet + PySceneDetect
 pip install -e ".[llm]"                 # + Ollama client
-pip install -e ".[full]"               # everything
+pip install -e ".[audio]"               # + HuggingFace AST audio events
+pip install -e ".[full]"                # everything
 ```
 
 Verify install:
@@ -275,7 +276,7 @@ cleancut clean movie.mp4 \
   -o movie.clean.mp4
 ```
 
-The subtitle track is written as a **soft (non-burned) track** in the MP4 container — toggle it on/off in VLC, Infuse, Plex, or any standard player. If ffmpeg is compiled with `--enable-libass`, subtitles are burned in instead.
+The subtitle track is written as a **soft (non-burned) track** in the output container (`mov_text` for .mp4/.m4v/.mov, `srt` for .mkv and others) — toggle it on/off in VLC, Infuse, Plex, or any standard player. If ffmpeg is compiled with `--enable-libass`, subtitles are burned in instead.
 
 ---
 
@@ -434,12 +435,14 @@ All heavy computations cache to `~/.cache/cleancut/` keyed by video file (mtime 
 
 | Stage | Cache type | Time saved |
 |-------|-----------|-----------|
-| Whisper transcript | Pass `--save-transcript FILE` once; use `--subs FILE` on re-runs | 20–35 min |
+| Whisper transcript | Auto-cached (also: `--save-transcript FILE` once, `--subs FILE` on re-runs) | 20–35 min |
 | PySceneDetect shot boundaries | Auto-cached | 5–10 min |
 | NudeNet visual scan | Auto-cached | 10–30 min |
+| LLM dialogue classification | Auto-cached | 2–5 min |
+| LLaVA VLM scene scan | Auto-cached | 15–30 min |
 | AST audio events | Auto-cached | 5–10 min |
 
-Cache is invalidated automatically when the video file changes (mtime or size).
+Cache is invalidated automatically when the video file changes (mtime or size), and entries for different configs coexist — toggling presets doesn't evict anything. If you saved a transcript with `--save-transcript`, the `.words.json` written alongside it is read back on `--subs` re-runs, so word-precise mutes survive across runs.
 
 ---
 
@@ -449,7 +452,7 @@ Cache is invalidated automatically when the video file changes (mtime or size).
 Use a smaller model via `--preset balanced` (small) or `--preset fast` (base), or pre-generate the transcript once and reuse it with `--subs`.
 
 **LLaVA / LLM not running**
-Ensure `ollama serve` is running (`ps aux | grep ollama`). Pull the models if missing:
+cleancut now fails loudly if Ollama is unreachable or a model is missing (the LLM/VLM stage is skipped with a visible warning rather than silently reporting nothing). Ensure `ollama serve` is running (`ps aux | grep ollama`) and pull the models if missing:
 ```bash
 ollama pull llama3.1:8b
 ollama pull llava:7b

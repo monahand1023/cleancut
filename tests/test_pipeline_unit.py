@@ -7,11 +7,6 @@ from pathlib import Path
 from cleancut.edl import EditDecisionList, EditDecision
 
 
-def test_snap_edl_to_shots_imports():
-    """Verify pipeline module imports without errors."""
-    from cleancut import pipeline  # noqa: F401
-
-
 def test_snap_edl_to_shots_empty_shots():
     """_snap_edl_to_shots returns unchanged EDL when no shots are available."""
     from cleancut.pipeline import _snap_edl_to_shots
