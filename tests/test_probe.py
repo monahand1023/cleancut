@@ -22,8 +22,8 @@ def _sub(idx, lang, codec="dvd_subtitle", title=""):
                   language=lang, title=title)
 
 
-def _video(idx=0, w=1920, h=1080):
-    return Stream(index=idx, codec_name="h264", codec_type="video", width=w, height=h)
+def _video(idx=0):
+    return Stream(index=idx, codec_name="h264", codec_type="video")
 
 
 def test_audio_streams_filter():

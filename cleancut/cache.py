@@ -8,6 +8,10 @@ any change invalidates.
 Used by:
 - PySceneDetect shot boundaries (`shots`)
 - NudeNet visual scan results (`nudenet`)
+- Whisper transcription (`whisper`)
+- LLM dialogue classification (`llm_dialogue`)
+- VLM scene classification (`vlm`)
+- AST audio events (`audio_events`)
 
 `save` and `load` work on plain Python dicts; the caller is responsible for
 serializing dataclasses to/from JSON-friendly forms.
@@ -31,8 +35,10 @@ def _video_fingerprint(video: Path) -> dict[str, Any]:
 
 
 def _cache_key(video: Path, feature: str, config_hash: str) -> Path:
+    # The config hash is part of the filename so entries for different
+    # configs coexist — toggling between two configs must not thrash.
     h = hashlib.sha256(str(video.resolve()).encode("utf-8")).hexdigest()[:16]
-    return CACHE_DIR / f"{h}.{feature}.json"
+    return CACHE_DIR / f"{h}.{feature}.{config_hash}.json"
 
 
 def config_hash(**fields: Any) -> str:
@@ -61,11 +67,14 @@ def load(video: Path, feature: str, expected_config_hash: str) -> dict | None:
 def save(video: Path, feature: str, config_hash_val: str, payload: dict) -> Path:
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     path = _cache_key(video, feature, config_hash_val)
-    path.write_text(json.dumps({
+    # Write-temp-then-rename so an interrupted save can't leave corrupt JSON.
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps({
         "video": _video_fingerprint(video),
         "config_hash": config_hash_val,
         "payload": payload,
     }, indent=2))
+    tmp.replace(path)
     return path
 
 
@@ -84,7 +93,7 @@ def clear(video: Path | None = None, feature: str | None = None) -> int:
             n += 1
         return n
     h = hashlib.sha256(str(video.resolve()).encode("utf-8")).hexdigest()[:16]
-    pattern = f"{h}.{feature}.json" if feature else f"{h}.*.json"
+    pattern = f"{h}.{feature}.*.json" if feature else f"{h}.*.json"
     for p in CACHE_DIR.glob(pattern):
         p.unlink()
         n += 1

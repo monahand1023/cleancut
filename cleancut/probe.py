@@ -3,11 +3,19 @@
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
+
+
+def _mkstemp_path(prefix: str, suffix: str) -> Path:
+    """mkstemp that closes the fd immediately — we only want the path."""
+    fd, name = tempfile.mkstemp(prefix=prefix, suffix=suffix)
+    os.close(fd)
+    return Path(name)
 
 
 # Container-internal subtitle codecs that produce text we can scan.
@@ -34,9 +42,21 @@ class Stream:
     codec_type: str  # "video" | "audio" | "subtitle" | "data"
     language: str = "und"
     title: str = ""
-    width: int | None = None
-    height: int | None = None
     channels: int | None = None
+
+
+def probe_duration(path: Path) -> float:
+    """Container duration in seconds via ffprobe."""
+    if not shutil.which("ffprobe"):
+        raise RuntimeError("ffprobe not found on PATH. It ships with ffmpeg.")
+    out = subprocess.check_output(
+        [
+            "ffprobe", "-v", "error",
+            "-show_entries", "format=duration",
+            "-of", "json", str(path),
+        ]
+    )
+    return float(json.loads(out)["format"]["duration"])
 
 
 def probe_streams(video: Path) -> list[Stream]:
@@ -60,8 +80,6 @@ def probe_streams(video: Path) -> list[Stream]:
                 codec_type=str(s.get("codec_type", "")),
                 language=str(s.get("tags", {}).get("language", "und")),
                 title=str(s.get("tags", {}).get("title", "")),
-                width=s.get("width"),
-                height=s.get("height"),
                 channels=s.get("channels"),
             )
         )
@@ -106,7 +124,7 @@ def extract_audio_to_wav(video: Path, audio_stream_index: int) -> Path:
     """
     if not shutil.which("ffmpeg"):
         raise RuntimeError("ffmpeg not found on PATH.")
-    tmp = Path(tempfile.mkstemp(prefix="cleancut_", suffix=".wav")[1])
+    tmp = _mkstemp_path(prefix="cleancut_", suffix=".wav")
     subprocess.run(
         [
             "ffmpeg", "-y", "-v", "error",
@@ -125,7 +143,7 @@ def extract_text_subtitle(video: Path, subtitle_stream_index: int) -> Path | Non
     """Extract an embedded text subtitle stream to a temporary .srt file."""
     if not shutil.which("ffmpeg"):
         raise RuntimeError("ffmpeg not found on PATH.")
-    tmp = Path(tempfile.mkstemp(prefix="cleancut_", suffix=".srt")[1])
+    tmp = _mkstemp_path(prefix="cleancut_", suffix=".srt")
     try:
         subprocess.run(
             [
@@ -157,12 +175,22 @@ def pick_embedded_subtitle(
     return text_subs[0]
 
 
+def _lang_prefs(prefer_language: str) -> dict[str, int]:
+    """Score map for sidecar suffixes, boosting the requested language."""
+    prefs = dict(LANG_PREFS)
+    if prefer_language:
+        prefs[prefer_language.lower()] = 12
+        prefs[prefer_language[:2].lower()] = 11
+    return prefs
+
+
 def find_sidecar_subtitle(video: Path, prefer_language: str = "eng") -> Path | None:
-    """Find the best .srt file next to the video.
+    """Find the best .srt file next to the video, preferring `prefer_language`.
 
     Recognizes Plex-style suffixes: Movie.srt, Movie.en.srt, Movie.eng.srt,
     Movie.English.srt. Also looks inside a `Subs/` subfolder if present.
     """
+    prefs = _lang_prefs(prefer_language)
     stem = video.stem
     candidates: list[tuple[int, Path]] = []
     search_dirs = [video.parent]
@@ -175,11 +203,11 @@ def find_sidecar_subtitle(video: Path, prefer_language: str = "eng") -> Path | N
             # Match either the exact stem or stem.suffix patterns.
             name = p.stem
             if name == stem:
-                candidates.append((LANG_PREFS.get("", 5), p))
+                candidates.append((prefs.get("", 5), p))
                 continue
             if name.startswith(stem + "."):
                 suffix = name[len(stem) + 1:].lower()
-                score = LANG_PREFS.get(suffix, LANG_PREFS.get(suffix[:2], 1))
+                score = prefs.get(suffix, prefs.get(suffix[:2], 1))
                 # Penalize SDH/forced flavors.
                 if "sdh" in suffix or "forced" in suffix:
                     score -= 3
@@ -187,7 +215,7 @@ def find_sidecar_subtitle(video: Path, prefer_language: str = "eng") -> Path | N
             elif p.parent == subs_dir:
                 # Inside Subs/, names usually don't include the movie name.
                 suffix = name.lower()
-                score = LANG_PREFS.get(suffix, LANG_PREFS.get(suffix[:2], 2))
+                score = prefs.get(suffix, prefs.get(suffix[:2], 2))
                 if "sdh" in suffix or "forced" in suffix:
                     score -= 3
                 candidates.append((score, p))

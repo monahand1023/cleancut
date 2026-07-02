@@ -53,7 +53,9 @@ def detect_shots(video_path: Path, threshold: float = 27.0, use_cache: bool = Tr
 
     scene_list = detect(str(video_path), ContentDetector(threshold=threshold))
     shots = [Shot(start=float(s.get_seconds()), end=float(e.get_seconds())) for s, e in scene_list]
-    if use_cache and shots:
+    # Empty results cache too — otherwise a shotless video re-runs the full
+    # pass on every scan.
+    if use_cache:
         _cache.save(video_path, "shots", h, {
             "shots": [{"start": s.start, "end": s.end} for s in shots],
             "count": len(shots),

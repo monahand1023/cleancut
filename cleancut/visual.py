@@ -57,10 +57,14 @@ def _detect_on_frame(detector, cv2, frame) -> list[dict]:
     try:
         return detector.detect(frame)
     except Exception:
+        import os
         import tempfile
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-            cv2.imwrite(tmp.name, frame)
-            return detector.detect(tmp.name)
+            try:
+                cv2.imwrite(tmp.name, frame)
+                return detector.detect(tmp.name)
+            finally:
+                os.unlink(tmp.name)
 
 
 def scan_video(
@@ -111,7 +115,7 @@ def scan_video(
 
         if shots:
             edl = _shot_aware_scan(
-                cv2, detector, cap, fps, duration, shots, config, action
+                cv2, detector, cap, fps, shots, config, action
             )
         else:
             edl = _streak_scan(
@@ -127,6 +131,28 @@ def scan_video(
     return edl
 
 
+def _iter_sampled_frames(cap, fps, samples):
+    """Decode sequentially, yielding (payload, frame) for each sample.
+
+    `samples` is an ascending list of (time_seconds, payload) pairs. Skipping
+    with grab() is far cheaper than CAP_PROP_POS_FRAMES seeks, which force a
+    keyframe seek + decode-forward for every sample (~14k per movie at the
+    thorough preset).
+    """
+    pos = 0
+    for t, payload in samples:
+        target = int(round(t * fps))
+        while pos < target:
+            if not cap.grab():
+                return
+            pos += 1
+        ok, frame = cap.read()
+        pos += 1
+        if not ok or frame is None:
+            continue
+        yield payload, frame
+
+
 def _streak_scan(cv2, detector, cap, fps, duration, config: Config, action: str) -> EditDecisionList:
     """No shot info: walk the video by `visual_sample_seconds`; require
     `visual_min_streak` consecutive hits before emitting a cut."""
@@ -135,16 +161,14 @@ def _streak_scan(cv2, detector, cap, fps, duration, config: Config, action: str)
     edl = EditDecisionList()
 
     n_samples = int(duration / sample_step) if duration > 0 else 0
+    samples = [(i * sample_step, i * sample_step) for i in range(n_samples)]
     streak_start: float | None = None
     streak_classes: set[str] = set()
     last_hit_t: float | None = None
 
-    for i in tqdm(range(n_samples), desc="Visual scan", unit="frame", leave=False):
-        t = i * sample_step
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(round(t * fps)))
-        ok, frame = cap.read()
-        if not ok or frame is None:
-            continue
+    for t, frame in _iter_sampled_frames(
+        cap, fps, tqdm(samples, desc="Visual scan", unit="frame", leave=False)
+    ):
         detections = _detect_on_frame(detector, cv2, frame)
         hits = [
             d for d in detections
@@ -198,46 +222,59 @@ def _emit_if_long_enough(
 
 
 def _shot_aware_scan(
-    cv2, detector, cap, fps, duration, shots: list[Shot], config: Config, action: str,
+    cv2, detector, cap, fps, shots: list[Shot], config: Config, action: str,
 ) -> EditDecisionList:
-    """For each shot: sample frames, compute hit fraction, cut shot if over threshold."""
+    """For each shot: sample frames, compute hit fraction, cut shot if over threshold.
+
+    All samples are decoded in one sequential pass over the video rather than
+    per-shot random seeks.
+    """
     edl = EditDecisionList()
     sample_step = config.visual_sample_seconds
     min_fraction = config.visual_shot_hit_fraction
-    min_frames_in_shot = 2  # tiny shots get a free pass
+    min_frames_in_shot = 2  # even tiny shots get two samples
 
-    for shot in tqdm(shots, desc="Visual scan (shots)", unit="shot", leave=False):
+    # Plan every sample up front: (time, shot index), ascending.
+    samples: list[tuple[float, int]] = []
+    n_planned: dict[int, int] = {}
+    for idx, shot in enumerate(shots):
         if shot.duration <= 0:
             continue
-        # Sample at sample_step within the shot, with a minimum of 2 samples.
         n = max(min_frames_in_shot, int(shot.duration / sample_step))
-        times = [shot.start + (shot.duration * (k + 0.5) / n) for k in range(n)]
-        hit_classes: set[str] = set()
-        n_hits = 0
-        for t in times:
-            cap.set(cv2.CAP_PROP_POS_FRAMES, int(round(t * fps)))
-            ok, frame = cap.read()
-            if not ok or frame is None:
-                continue
-            detections = _detect_on_frame(detector, cv2, frame)
-            hits = [
-                d for d in detections
-                if d.get("class") in EXPLICIT_CLASSES
-                and float(d.get("score", 0)) >= config.visual_threshold
-            ]
-            if hits:
-                n_hits += 1
-                hit_classes.update(d["class"] for d in hits)
+        n_planned[idx] = n
+        samples += [(shot.start + (shot.duration * (k + 0.5) / n), idx) for k in range(n)]
+    samples.sort(key=lambda x: x[0])
 
-        fraction = n_hits / max(1, len(times))
-        if fraction >= min_fraction and n_hits >= 2:
+    n_hits: dict[int, int] = {}
+    hit_classes: dict[int, set[str]] = {}
+    for idx, frame in _iter_sampled_frames(
+        cap, fps, tqdm(samples, desc="Visual scan (shots)", unit="frame", leave=False)
+    ):
+        detections = _detect_on_frame(detector, cv2, frame)
+        hits = [
+            d for d in detections
+            if d.get("class") in EXPLICIT_CLASSES
+            and float(d.get("score", 0)) >= config.visual_threshold
+        ]
+        if hits:
+            n_hits[idx] = n_hits.get(idx, 0) + 1
+            hit_classes.setdefault(idx, set()).update(d["class"] for d in hits)
+
+    for idx, shot in enumerate(shots):
+        hits_in_shot = n_hits.get(idx, 0)
+        planned = n_planned.get(idx, 0)
+        fraction = hits_in_shot / max(1, planned)
+        # The >= 2 floor means a two-sample shot needs both frames flagged —
+        # single-frame hits never cut a shot.
+        if fraction >= min_fraction and hits_in_shot >= 2:
             edl.add(
                 EditDecision(
                     start=shot.start,
                     end=shot.end,
                     action=action,
                     category="nudity",
-                    reason=f"shot {n_hits}/{len(times)} frames flagged: {', '.join(sorted(hit_classes))}",
+                    reason=f"shot {hits_in_shot}/{planned} frames flagged: "
+                           f"{', '.join(sorted(hit_classes.get(idx, set())))}",
                     source="visual-shot",
                 )
             )
