@@ -6,8 +6,12 @@ from collections import Counter
 from pathlib import Path
 
 from cleancut.config import Config
+from cleancut.constants import MAX_REASON_LENGTH
 from cleancut.edl import EditDecisionList
+from cleancut.edl_ops import fmt_timestamp
 from cleancut.probe import (
+    IMAGE_SUBTITLE_CODECS,
+    TEXT_SUBTITLE_CODECS,
     Stream,
     find_sidecar_subtitle,
     pick_audio_track,
@@ -17,14 +21,7 @@ from cleancut.probe import (
 
 
 def _fmt_time(seconds: float) -> str:
-    if seconds < 0:
-        seconds = 0
-    h = int(seconds // 3600)
-    m = int((seconds % 3600) // 60)
-    s = seconds - h * 3600 - m * 60
-    if h:
-        return f"{h}:{m:02d}:{s:05.2f}"
-    return f"{m}:{s:05.2f}"
+    return fmt_timestamp(max(0.0, seconds))
 
 
 def _fmt_duration(seconds: float) -> str:
@@ -79,9 +76,9 @@ def build_plan(
                 )
             else:
                 text_subs = [s for s in subtitle_streams(streams)
-                             if s.codec_name in {"subrip", "srt", "mov_text", "ass", "ssa", "webvtt"}]
+                             if s.codec_name in TEXT_SUBTITLE_CODECS]
                 image_subs = [s for s in subtitle_streams(streams)
-                              if s.codec_name in {"dvd_subtitle", "hdmv_pgs_subtitle", "dvb_subtitle"}]
+                              if s.codec_name in IMAGE_SUBTITLE_CODECS]
                 if image_subs and not text_subs:
                     lines.append(
                         f"  {len(image_subs)} image-based subtitle track(s) "
@@ -213,8 +210,7 @@ def build_results_report(
     lines.append("")
 
     # Top matched words / phrases
-    from collections import Counter as C
-    phrases: C = C()
+    phrases: Counter[str] = Counter()
     for d in decisions:
         if d.text_before:
             # Just the matched part from `reason: "matched: foo"` if present
@@ -240,11 +236,11 @@ def build_results_report(
         if d.text_before:
             before = d.text_before.replace("\n", " ")
             after = d.text_after.replace("\n", " ") if d.text_after else ""
-            lines.append(f"        before: {before[:140]}")
+            lines.append(f"        before: {before[:MAX_REASON_LENGTH]}")
             if after and after != before:
-                lines.append(f"        after:  {after[:140]}")
+                lines.append(f"        after:  {after[:MAX_REASON_LENGTH]}")
         elif d.reason:
-            lines.append(f"        reason: {d.reason[:140]}")
+            lines.append(f"        reason: {d.reason[:MAX_REASON_LENGTH]}")
     return "\n".join(lines)
 
 

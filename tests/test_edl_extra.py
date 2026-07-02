@@ -39,16 +39,6 @@ def test_summary_strips_combined_categories():
     assert summary == {"cut:sex": 1}
 
 
-def test_filter_accepted():
-    edl = EditDecisionList(decisions=[
-        _d(0, 1, accepted=True),
-        _d(2, 3, accepted=False),
-        _d(4, 5, accepted=True),
-    ])
-    kept = edl.filter_accepted()
-    assert len(kept) == 2
-
-
 def test_by_action_only_returns_accepted():
     edl = EditDecisionList(decisions=[
         _d(0, 1, action="mute", accepted=True),

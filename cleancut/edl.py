@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Iterable
 
@@ -51,13 +51,6 @@ class EditDecisionList:
             subtitle_path=self.subtitle_path,
         )
 
-    def filter_accepted(self) -> EditDecisionList:
-        return EditDecisionList(
-            decisions=[d for d in self.decisions if d.accepted],
-            video_path=self.video_path,
-            subtitle_path=self.subtitle_path,
-        )
-
     def by_action(self, action: str) -> list[EditDecision]:
         return [d for d in self.decisions if d.action == action and d.accepted]
 
@@ -85,7 +78,9 @@ class EditDecisionList:
             return EditDecisionList(video_path=self.video_path, subtitle_path=self.subtitle_path)
         ranked = {"keep": 0, "mute": 1, "cut": 2}
         items = sorted(self.decisions, key=lambda d: d.start)
-        merged: list[EditDecision] = [items[0]]
+        # Copy before extending in place — callers' decision objects (e.g. ones
+        # loaded from an EDL file) must not be silently modified.
+        merged: list[EditDecision] = [replace(items[0])]
         for d in items[1:]:
             last = merged[-1]
             if d.start <= last.end + gap:
@@ -101,7 +96,7 @@ class EditDecisionList:
                 if d.source and d.source not in last.source:
                     last.source = f"{last.source}+{d.source}"
             else:
-                merged.append(d)
+                merged.append(replace(d))
         return EditDecisionList(
             decisions=merged, video_path=self.video_path, subtitle_path=self.subtitle_path
         )
@@ -124,8 +119,11 @@ class EditDecisionList:
         )
 
     def summary(self) -> dict[str, int]:
+        """Counts accepted decisions only — must agree with what renders."""
         out: dict[str, int] = {}
         for d in self.decisions:
+            if not d.accepted:
+                continue
             key = f"{d.action}:{d.category.split('+')[0]}"
             out[key] = out.get(key, 0) + 1
         return out

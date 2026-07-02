@@ -20,7 +20,6 @@ from cleancut.edl import EditDecision, EditDecisionList
 DIALOGUE_SOURCES = {
     "subtitle",
     "whisper-word",
-    "whisper-line",
     "llm-dialogue",
     "audio",        # audio events are content-bearing too
 }
@@ -70,7 +69,8 @@ def find_clusters(edl: EditDecisionList, params: DensityParams) -> EditDecisionL
         if in_window >= params.min_events:
             # Extend the cluster as long as each next event still keeps density.
             cluster_start = events[i].start
-            cluster_end = events[j].end
+            # Events are sorted by start — an early long event can end last.
+            cluster_end = max(e.end for e in events[i:j + 1])
             k = j
             while k + 1 < n:
                 # Check if adding events[k+1] keeps a rolling density.

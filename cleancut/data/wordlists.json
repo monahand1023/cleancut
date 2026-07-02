@@ -5,7 +5,7 @@
     "\\bb+i+t+c+h+\\w*\\b",
     "\\bb+a+s+t+a+r+d+\\w*\\b",
     "\\ba+s+s+h+o+l+e+\\w*\\b",
-    "\\bd+i+c+k+(head|wad)?\\w*\\b",
+    "\\bd+i+c+k+(head|wad|weed)?s?\\b",
     "\\bp+r+i+c+k+\\w*\\b",
     "\\bc+u+n+t+\\w*\\b",
     "\\bm+o+t+h+e+r+f+u+c+k+\\w*\\b",

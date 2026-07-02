@@ -9,7 +9,7 @@ from cleancut.report import build_plan, build_results_report, write_report
 
 
 def _video_stream():
-    return Stream(index=0, codec_name="h264", codec_type="video", width=1920, height=1080)
+    return Stream(index=0, codec_name="h264", codec_type="video")
 
 
 def _audio(idx, lang):

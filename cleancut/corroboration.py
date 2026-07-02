@@ -17,7 +17,6 @@ from cleancut.edl import EditDecisionList
 CORROBORATING_SOURCES = {
     "subtitle",
     "whisper-word",
-    "whisper-line",
     "llm-dialogue",
     "audio",
     "density",

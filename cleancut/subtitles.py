@@ -72,6 +72,9 @@ def _compile_patterns(
 # within this many seconds on either side. 30s ≈ one dialogue exchange.
 CONTEXT_WINDOW_SECONDS = 30.0
 
+# When several categories match the same line/window, the highest wins.
+CATEGORY_SEVERITY = {"profanity": 1, "violence": 2, "drugs": 3, "sex": 4, "nudity": 5}
+
 
 def _filter_weak_without_context(
     edl: EditDecisionList, window: float = CONTEXT_WINDOW_SECONDS,
@@ -128,10 +131,10 @@ def scan_subtitles(subs: list[Subtitle], config: Config) -> EditDecisionList:
         if not matches:
             continue
 
-        # Pick the highest-severity category if multiple hit the same line.
-        severity = {"profanity": 1, "violence": 2, "drugs": 3, "sex": 4, "nudity": 5}
         # Prefer strong matches; break ties by severity.
-        best = sorted(matches, key=lambda x: (x[2] != "strong", -severity.get(x[0], 0)))[0]
+        best = sorted(
+            matches, key=lambda x: (x[2] != "strong", -CATEGORY_SEVERITY.get(x[0], 0))
+        )[0]
         category, _, line_strength = best
         action = config.actions.get(category, "mute")
         if action == "keep":
@@ -156,17 +159,25 @@ def scan_subtitles(subs: list[Subtitle], config: Config) -> EditDecisionList:
 
 
 def soften_text(text: str, replacements: dict[str, str]) -> str:
-    """Case-preserving word-boundary substitution for each entry in replacements."""
+    """Case-preserving word-boundary substitution, in a single pass.
+
+    A single combined regex guarantees replacements never re-substitute each
+    other's output (shit→crap plus crap→crud must yield "crap", not "crud").
+    """
     if not replacements:
         return text
-    # Sort longer phrases first so multi-word entries take precedence.
+    # Longer phrases first so multi-word entries win the alternation.
     keys = sorted(replacements.keys(), key=len, reverse=True)
-    out = text
-    for key in keys:
-        repl = replacements[key]
-        pattern = re.compile(r"\b" + re.escape(key) + r"\b", re.IGNORECASE)
-        out = pattern.sub(lambda m, r=repl: _match_case(m.group(0), r), out)
-    return out
+    pattern = re.compile(
+        r"\b(?:" + "|".join(re.escape(k) for k in keys) + r")\b", re.IGNORECASE
+    )
+    lower_map = {k.lower(): v for k, v in replacements.items()}
+
+    def _sub(m: re.Match) -> str:
+        original = m.group(0)
+        return _match_case(original, lower_map[original.lower()])
+
+    return pattern.sub(_sub, text)
 
 
 def _match_case(original: str, replacement: str) -> str:
@@ -196,7 +207,6 @@ def scan_words(words, config: Config) -> EditDecisionList:
     a hard dep on the whisper extras.
     """
     patterns = _compile_patterns(config.wordlists)
-    severity = {"profanity": 1, "violence": 2, "drugs": 3, "sex": 4, "nudity": 5}
     edl = EditDecisionList()
 
     n = len(words)
@@ -217,7 +227,7 @@ def scan_words(words, config: Config) -> EditDecisionList:
                 for pat, strength in pats:
                     m = pat.search(text)
                     if m:
-                        sev = severity.get(category, 0)
+                        sev = CATEGORY_SEVERITY.get(category, 0)
                         score = (sev, strength == "strong")
                         if score > best_score:
                             best = (category, m.group(0), strength)

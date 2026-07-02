@@ -50,13 +50,3 @@ def test_roundtrip_json(tmp_path: Path):
     assert loaded.video_path == "/tmp/video.mp4"
     assert len(loaded) == 2
     assert loaded.decisions[1].category == "nudity"
-
-
-def test_filter_accepted():
-    edl = EditDecisionList(decisions=[
-        _d(1, 2),
-        EditDecision(start=3, end=4, action="mute", category="drugs", accepted=False),
-        _d(5, 6),
-    ])
-    filtered = edl.filter_accepted()
-    assert len(filtered) == 2
