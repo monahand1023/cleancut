@@ -6,15 +6,14 @@ here so existing callers (pipeline.py, cli.py, tests) need no changes.
 
 from __future__ import annotations
 
-import json
 import shutil
 import subprocess
 import tempfile
 from pathlib import Path
 
 
-# Re-export all pure-arithmetic names from editor_ranges so any code that
-# does `from cleancut.editor import Range, keep_segments, …` keeps working.
+# Re-export pure-arithmetic names from editor_ranges and the ffprobe wrapper
+# from probe so any code doing `from cleancut.editor import …` keeps working.
 from cleancut.editor_ranges import (  # noqa: F401
     Range,
     adjust_subtitles_for_cuts,
@@ -23,6 +22,7 @@ from cleancut.editor_ranges import (  # noqa: F401
     shift_after_cuts,
     shift_ranges_after_cuts,
 )
+from cleancut.probe import probe_duration  # noqa: F401
 
 
 def _require_ffmpeg() -> None:
@@ -32,23 +32,11 @@ def _require_ffmpeg() -> None:
         raise RuntimeError("ffprobe not found on PATH. It ships with ffmpeg.")
 
 
-def probe_duration(path: Path) -> float:
-    _require_ffmpeg()
-    out = subprocess.check_output(
-        [
-            "ffprobe", "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "json", str(path),
-        ]
-    )
-    return float(json.loads(out)["format"]["duration"])
-
-
 def _video_encoder_args(encoder: str, quality: int) -> list[str]:
     """Return ffmpeg flags for the chosen video encoder."""
     if encoder == "videotoolbox":
         # videotoolbox uses -q:v (higher = better). Map CRF-ish quality to a sensible q.
-        # CRF 18 ~ q 65, CRF 20 ~ q 60, CRF 23 ~ q 50.
+        # CRF 18 ~ q 54, CRF 20 ~ q 50, CRF 23 ~ q 44.
         q = max(30, min(100, 90 - quality * 2))
         return ["-c:v", "h264_videotoolbox", "-q:v", str(q), "-b:v", "0"]
     # libx264 default
@@ -131,6 +119,11 @@ def apply_mutes_and_subs(
     """
     _require_ffmpeg()
 
+    # Burn mode runs ffmpeg with cwd inside a temp dir (so the subtitles= filter
+    # sees a shell-safe path); relative input/output would resolve there instead.
+    input_path = input_path.resolve()
+    output_path = output_path.resolve()
+
     can_burn = burn_subs and srt_path and srt_path.exists() and _ffmpeg_has_libass()
 
     cmd: list[str] = ["ffmpeg", "-y", "-i", str(input_path)]
@@ -155,10 +148,12 @@ def apply_mutes_and_subs(
             cmd += ["-vf", "subtitles=subs.srt"]
             cmd += _video_encoder_args(encoder, quality)
         elif has_soft_subs:
-            # Stream-copy video, encode subs as mov_text into the MP4 container.
+            # Stream-copy video, encode subs into the container. mov_text is
+            # MP4-family only; Matroska (and most others) take srt.
+            sub_codec = "mov_text" if output_path.suffix.lower() in {".mp4", ".m4v", ".mov"} else "srt"
             cmd += ["-map", "0:v", "-map", "0:a", "-map", "1:0"]
             cmd += ["-c:v", "copy"]
-            cmd += ["-c:s", "mov_text"]
+            cmd += ["-c:s", sub_codec]
             cmd += ["-metadata:s:s:0", "language=eng",
                     "-metadata:s:s:0", "title=cleancut (softened)"]
         else:

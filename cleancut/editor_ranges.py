@@ -36,14 +36,26 @@ def keep_segments(duration: float, cuts: list[Range]) -> list[Range]:
     return [r for r in kept if r.duration > 0.001]
 
 
+def _merge_ranges(ranges: list[Range]) -> list[Range]:
+    """Sort and union overlapping/touching ranges."""
+    merged: list[Range] = []
+    for r in sorted(ranges, key=lambda r: r.start):
+        if merged and r.start <= merged[-1].end:
+            merged[-1] = Range(merged[-1].start, max(merged[-1].end, r.end))
+        else:
+            merged.append(Range(r.start, r.end))
+    return merged
+
+
 def shift_after_cuts(t: float, cuts: list[Range]) -> float | None:
     """Map a source-timeline timestamp to the cut-output timeline.
 
-    Returns None if `t` falls inside a removed segment.
+    Returns None if `t` falls inside a removed segment. Overlapping cuts are
+    unioned first — subtracting each duration would double-count the overlap.
     """
     out = t
-    for c in sorted(cuts, key=lambda r: r.start):
-        if c.start >= t:
+    for c in _merge_ranges(cuts):
+        if c.start > t:
             break
         if c.start <= t <= c.end:
             return None

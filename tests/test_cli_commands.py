@@ -33,73 +33,32 @@ def _make_edl(n_decisions: int = 1, video_path: str = "/fake/video.mp4") -> Edit
     return EditDecisionList(decisions=decisions, video_path=video_path)
 
 
-def _scan_args(tmp_path: Path, **extra) -> argparse.Namespace:
-    """Minimal argparse.Namespace for cmd_scan."""
+def _args_via_parser(subcommand: str, tmp_path: Path, **extra) -> argparse.Namespace:
+    """Build a Namespace through the REAL parser so defaults can never drift
+    from the CLI, then apply per-test attribute overrides."""
+    from cleancut.cli import build_parser
+
     video = tmp_path / "movie.mp4"
     video.write_bytes(b"\x00")
-    defaults = dict(
-        video=str(video),
-        subs=None,
-        output=None,
-        preset=None,
-        wordlists=None,
-        replacements=None,
-        enable_category=None,
-        disable_category=None,
-        action=None,
-        whisper_model=None,
-        whisper_device=None,
-        whisper_language=None,
-        visual_threshold=None,
-        visual_sample_seconds=None,
-        visual_min_streak=None,
-        visual_shot_hit_fraction=None,
-        scene_threshold=None,
-        encoder=None,
-        quality=None,
-        density=None,
-        density_window=None,
-        density_min_events=None,
-        llm=None,
-        llm_model=None,
-        llm_host=None,
-        llm_min_confidence=None,
-        vlm=None,
-        vlm_model=None,
-        vlm_mode=None,
-        vlm_stride=None,
-        vlm_min_confidence=None,
-        vlm_gaps_radius=None,
-        audio_events=None,
-        audio_events_threshold=None,
-        corroboration_radius=None,
-        no_word_timestamps=False,
-        no_snap_to_scenes=False,
-        vlm_cut_intimate=False,
-        allow_solo_visual=False,
-        no_visual=False,
-        no_whisper=True,
-        no_scenes=True,
-        no_burn_subs=False,
-        audio_track=None,
-        prefer_language="eng",
-        save_transcript=None,
+    ns = build_parser().parse_args(
+        [subcommand, str(video), "--no-whisper", "--no-scenes"]
     )
-    defaults.update(extra)
-    return argparse.Namespace(**defaults)
+    ns.preset = None  # tests exercise raw Config defaults unless they opt in
+    for k, v in extra.items():
+        setattr(ns, k, v)
+    return ns
+
+
+def _scan_args(tmp_path: Path, **extra) -> argparse.Namespace:
+    return _args_via_parser("scan", tmp_path, **extra)
 
 
 def _clean_args(tmp_path: Path, **extra) -> argparse.Namespace:
-    ns = _scan_args(tmp_path, **extra)
-    ns.edl = None
-    ns.edl_out = None
-    return ns
+    return _args_via_parser("clean", tmp_path, **extra)
 
 
 def _inspect_args(tmp_path: Path, **extra) -> argparse.Namespace:
-    ns = _scan_args(tmp_path, **extra)
-    ns.report_out = None
-    return ns
+    return _args_via_parser("inspect", tmp_path, **extra)
 
 
 # ---------------------------------------------------------------------------
@@ -185,8 +144,8 @@ class TestCmdClean:
         expected_out = video_path.with_name(f"{video_path.stem}.clean{video_path.suffix}")
         expected_out.write_bytes(b"\x00")  # fake output file
 
-        with patch("cleancut.cli.run_full", return_value=expected_out) as mock_run, \
-             patch("cleancut.cli.build_edl", return_value=(_make_edl(), [])), \
+        with patch("cleancut.cli.run_full", return_value=(expected_out, _make_edl())) as mock_run, \
+             patch("cleancut.cli.build_edl", return_value=(_make_edl(), [])) as mock_build, \
              patch("cleancut.editor.probe_duration", return_value=60.0), \
              patch("cleancut.cli.write_report"), \
              patch("cleancut.cli.build_results_report", return_value="report"):
@@ -194,6 +153,9 @@ class TestCmdClean:
 
         assert result == 0
         mock_run.assert_called_once()
+        # The report must reuse the EDL from run_full — a second build_edl call
+        # would re-run the whole detection stack (Whisper/LLM/VLM) for nothing.
+        mock_build.assert_not_called()
 
     def test_explicit_output_path_is_used(self, tmp_path):
         out = tmp_path / "clean_output.mp4"
@@ -203,7 +165,7 @@ class TestCmdClean:
 
         def fake_run(opts, config):
             captured["opts"] = opts
-            return out
+            return out, _make_edl()
 
         with patch("cleancut.cli.run_full", side_effect=fake_run), \
              patch("cleancut.cli.build_edl", return_value=(_make_edl(), [])), \
@@ -224,7 +186,7 @@ class TestCmdClean:
 
         def fake_run(opts, config):
             captured["opts"] = opts
-            return expected_default
+            return expected_default, _make_edl()
 
         with patch("cleancut.cli.run_full", side_effect=fake_run), \
              patch("cleancut.cli.build_edl", return_value=(_make_edl(), [])), \
@@ -410,15 +372,15 @@ class TestCmdReview:
         return edl_path, video
 
     def _review_args(self, edl_path: Path, video: Path | None = None, **extra):
-        defaults = dict(
-            edl=str(edl_path),
-            video=str(video) if video else None,
-            subs=None,
-            frames_dir=None,
-            include_violence=False,
-        )
-        defaults.update(extra)
-        return argparse.Namespace(**defaults)
+        from cleancut.cli import build_parser
+
+        argv = ["review", str(edl_path)]
+        if video:
+            argv += ["--video", str(video)]
+        ns = build_parser().parse_args(argv)
+        for k, v in extra.items():
+            setattr(ns, k, v)
+        return ns
 
     def test_missing_edl_returns_1(self, tmp_path):
         args = self._review_args(tmp_path / "nonexistent.edl.json",

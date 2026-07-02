@@ -23,6 +23,8 @@ from cleancut.report import build_plan, build_results_report, write_report
 
 console = Console()
 
+CATEGORIES = ("profanity", "drugs", "sex", "violence", "nudity")
+
 # Simple arg-to-config mappings: (argparse_dest, config_attribute).
 # These are pure pass-through — if the arg value is not None (or truthy), copy it directly.
 _SIMPLE_ARG_MAP: list[tuple[str, str]] = [
@@ -81,6 +83,10 @@ def _apply_common(args: argparse.Namespace, config: "Config") -> None:
         if "=" not in spec:
             raise SystemExit(f"--action must be CATEGORY=ACTION, got {spec!r}")
         cat, action = spec.split("=", 1)
+        if cat not in CATEGORIES:
+            raise SystemExit(
+                f"unknown category {cat!r}; choose from {'|'.join(CATEGORIES)}"
+            )
         if action not in ("mute", "cut", "keep"):
             raise SystemExit(f"action must be mute|cut|keep, got {action!r}")
         config.actions[cat] = action  # type: ignore[assignment]
@@ -199,19 +205,46 @@ def _add_common(p: argparse.ArgumentParser) -> None:
                    help="Persist Whisper output to this .srt path (and .words.json alongside).")
 
 
-def cmd_scan(args) -> int:
-    config = Config.load_defaults()
-    _apply_common(args, config)
-    opts = PipelineOptions(
+def _options_from_args(args: argparse.Namespace, **overrides) -> PipelineOptions:
+    """Build PipelineOptions from the CLI flags shared by scan/clean."""
+    fields: dict = dict(
         video=Path(args.video),
         subs=Path(args.subs) if args.subs else None,
-        edl_out=Path(args.output) if args.output else Path(args.video).with_suffix(".edl.json"),
         use_visual=not args.no_visual,
         use_whisper=not args.no_whisper,
         use_scenes=not args.no_scenes,
         audio_track=args.audio_track,
         prefer_language=args.prefer_language,
         save_transcript=Path(args.save_transcript) if args.save_transcript else None,
+    )
+    fields.update(overrides)
+    return PipelineOptions(**fields)
+
+
+def _write_results_report(
+    video: Path | None, output: Path | None, edl: EditDecisionList, report_path: Path,
+) -> None:
+    """Probe duration (best-effort), then build and write the results report."""
+    duration = None
+    if video is not None:
+        try:
+            from cleancut.editor import probe_duration
+            duration = probe_duration(video)
+        except Exception:
+            duration = None
+    report = build_results_report(
+        video if video is not None else Path("?"), output, edl, original_duration=duration,
+    )
+    write_report(report, report_path)
+    console.print(f"[green]Wrote report[/green] {report_path}")
+
+
+def cmd_scan(args) -> int:
+    config = Config.load_defaults()
+    _apply_common(args, config)
+    opts = _options_from_args(
+        args,
+        edl_out=Path(args.output) if args.output else Path(args.video).with_suffix(".edl.json"),
     )
     edl, _ = build_edl(opts, config)
     edl.to_json(opts.edl_out)
@@ -219,15 +252,7 @@ def cmd_scan(args) -> int:
     console.print(f"[bold]Summary[/bold]: {edl.summary()}")
 
     # Always write a human-readable report next to the EDL.
-    from cleancut.editor import probe_duration
-    try:
-        duration = probe_duration(opts.video)
-    except Exception:
-        duration = None
-    report = build_results_report(opts.video, None, edl, original_duration=duration)
-    report_path = opts.edl_out.with_suffix(".report.txt")
-    write_report(report, report_path)
-    console.print(f"[green]Wrote report[/green] {report_path}")
+    _write_results_report(opts.video, None, edl, opts.edl_out.with_suffix(".report.txt"))
     return 0
 
 
@@ -235,42 +260,18 @@ def cmd_clean(args) -> int:
     config = Config.load_defaults()
     _apply_common(args, config)
     video = Path(args.video)
-    opts = PipelineOptions(
-        video=video,
-        subs=Path(args.subs) if args.subs else None,
+    opts = _options_from_args(
+        args,
         output=Path(args.output) if args.output else video.with_name(f"{video.stem}.clean{video.suffix}"),
         edl_in=Path(args.edl) if args.edl else None,
         edl_out=Path(args.edl_out) if args.edl_out else None,
-        use_visual=not args.no_visual,
-        use_whisper=not args.no_whisper,
-        use_scenes=not args.no_scenes,
         burn_subs=not args.no_burn_subs,
-        audio_track=args.audio_track,
-        prefer_language=args.prefer_language,
-        save_transcript=Path(args.save_transcript) if args.save_transcript else None,
     )
-    out = run_full(opts, config)
+    out, edl = run_full(opts, config)
     console.print(f"[green bold]Wrote[/green bold] {out}")
 
-    # After clean, write the results report next to the output video.
-    # We re-read the EDL that run_full just wrote (if available), otherwise rebuild.
-    from cleancut.editor import probe_duration
-    edl_for_report: EditDecisionList | None = None
-    if opts.edl_out and Path(opts.edl_out).exists():
-        edl_for_report = EditDecisionList.from_json(Path(opts.edl_out))
-    elif opts.edl_in and Path(opts.edl_in).exists():
-        edl_for_report = EditDecisionList.from_json(Path(opts.edl_in))
-    if edl_for_report is None:
-        # Render didn't persist an EDL — fall back to rebuilding.
-        edl_for_report, _ = build_edl(opts, config)
-    try:
-        duration = probe_duration(opts.video)
-    except Exception:
-        duration = None
-    report = build_results_report(opts.video, opts.output, edl_for_report, original_duration=duration)
-    report_path = opts.output.with_suffix(".report.txt")
-    write_report(report, report_path)
-    console.print(f"[green]Wrote report[/green] {report_path}")
+    # Report reuses the EDL run_full just built — never re-run detection for it.
+    _write_results_report(opts.video, opts.output, edl, opts.output.with_suffix(".report.txt"))
     return 0
 
 
@@ -319,31 +320,25 @@ def cmd_add_cut(args) -> int:
     )
 
     # Refresh report
-    try:
-        from cleancut.editor import probe_duration
-        duration = probe_duration(Path(edl.video_path)) if edl.video_path else None
-    except Exception:
-        duration = None
-    report = build_results_report(
-        Path(edl.video_path) if edl.video_path else Path("?"),
-        None, edl, original_duration=duration,
+    _write_results_report(
+        Path(edl.video_path) if edl.video_path else None,
+        None, edl, edl_path.with_suffix(".report.txt"),
     )
-    report_path = edl_path.with_suffix(".report.txt")
-    write_report(report, report_path)
-    console.print(f"[green]Report refreshed[/green] {report_path}")
     return 0
 
 
 def cmd_review(args) -> int:
-    import subprocess
-    from cleancut.edl_ops import fmt_timestamp
 
     edl_path = Path(args.edl)
     if not edl_path.exists():
         console.print(f"[red]EDL not found:[/red] {edl_path}")
         return 1
     edl = EditDecisionList.from_json(edl_path)
-    video = Path(args.video) if args.video else Path(edl.video_path)
+    video_str = args.video or edl.video_path
+    if not video_str:
+        console.print("[red]EDL has no video path — pass --video.[/red]")
+        return 1
+    video = Path(video_str)
     if not video.exists():
         console.print(f"[red]Video not found:[/red] {video}")
         return 1
@@ -356,14 +351,8 @@ def cmd_review(args) -> int:
         subs = read_srt(srt)
 
     # What to review.
-    FOCAL = {"sex", "drugs", "nudity"}
-    def is_focal(d):
-        cats = set(d.category.split("+"))
-        return bool(cats & FOCAL)
-    cuts = [d for d in edl.decisions if d.action == "cut" and d.accepted]
-    if not args.include_violence:
-        cuts = [d for d in cuts if is_focal(d)]
-    cuts.sort(key=lambda d: d.start)
+    from cleancut.edl_ops import cuts_for_review
+    cuts = cuts_for_review(edl, include_violence=args.include_violence)
     if not cuts:
         console.print("[yellow]No cuts to review.[/yellow]")
         return 0
@@ -384,13 +373,33 @@ def cmd_review(args) -> int:
             f"[yellow]q[/yellow]=save and quit, [white]o[/white]=open frame)"
         )
 
+        try:
+            _review_loop(cuts, video, subs, out_dir)
+        except (EOFError, KeyboardInterrupt):
+            # Closed stdin / Ctrl-C must not throw away the review work done
+            # so far — save and exit cleanly.
+            console.print("\n[yellow]Interrupted — saving progress.[/yellow]")
+        _save_review(edl, edl_path)
+        return 0
+    finally:
+        if _tmp_dir is not None:
+            shutil.rmtree(_tmp_dir, ignore_errors=True)
+
+
+class _ReviewQuit(Exception):
+    """Raised when the user enters 'q' — save and exit."""
+
+
+def _review_loop(cuts, video: Path, subs: list, out_dir: Path) -> None:
+    """Walk the user through each cut, mutating decisions in place."""
+    import subprocess
+    from cleancut.edl_ops import fmt_timestamp
+
+    try:
         for i, d in enumerate(cuts, 1):
             # Extract frame
-            t = d.start + d.duration / 2.0
-            h = int(t // 3600)
-            m = int((t % 3600) // 60)
-            sec = t - h * 3600 - m * 60
-            ts = f"{h:02d}:{m:02d}:{sec:06.3f}"
+            from cleancut.edl_ops import fmt_ffmpeg_timestamp
+            ts = fmt_ffmpeg_timestamp(d.start + d.duration / 2.0)
             frame = out_dir / f"cut_{i:02d}.jpg"
             subprocess.run(
                 ["ffmpeg", "-y", "-v", "error", "-ss", ts, "-i", str(video),
@@ -438,8 +447,7 @@ def cmd_review(args) -> int:
                     subprocess.run(["open", str(frame)], check=False)
                     continue
                 if ans == "q":
-                    _save_review(edl, edl_path)
-                    return 0
+                    raise _ReviewQuit
                 if ans.startswith("t "):
                     try:
                         parts = ans.split(maxsplit=2)
@@ -448,8 +456,14 @@ def cmd_review(args) -> int:
                             continue
                         _, new_s, new_e = parts
                         from cleancut.edl_ops import parse_timestamp
-                        d.start = parse_timestamp(new_s)
-                        d.end = parse_timestamp(new_e)
+                        # Parse both before assigning either, so a bad END
+                        # can't leave a half-applied trim.
+                        start_val = parse_timestamp(new_s)
+                        end_val = parse_timestamp(new_e)
+                        if end_val <= start_val:
+                            console.print("  [red]end must be > start[/red]")
+                            continue
+                        d.start, d.end = start_val, end_val
                         console.print(
                             f"  [cyan]trimmed → "
                             f"{fmt_timestamp(d.start)} → {fmt_timestamp(d.end)}[/cyan]"
@@ -459,29 +473,17 @@ def cmd_review(args) -> int:
                         console.print(f"  [red]bad trim: {e}[/red]")
                         continue
                 console.print("  [yellow]?[/yellow] y/n/t START END/s/o/q")
-
-        _save_review(edl, edl_path)
-        return 0
-    finally:
-        if _tmp_dir is not None:
-            shutil.rmtree(_tmp_dir, ignore_errors=True)
+    except _ReviewQuit:
+        pass
 
 
 def _save_review(edl: EditDecisionList, edl_path: Path) -> None:
     edl.to_json(edl_path)
     console.print(f"\n[green]Saved {edl_path}[/green]")
-    try:
-        from cleancut.editor import probe_duration
-        duration = probe_duration(Path(edl.video_path)) if edl.video_path else None
-    except Exception:
-        duration = None
-    report = build_results_report(
-        Path(edl.video_path) if edl.video_path else Path("?"),
-        None, edl, original_duration=duration,
+    _write_results_report(
+        Path(edl.video_path) if edl.video_path else None,
+        None, edl, edl_path.with_suffix(".report.txt"),
     )
-    report_path = edl_path.with_suffix(".report.txt")
-    write_report(report, report_path)
-    console.print(f"[green]Report refreshed[/green] {report_path}")
 
 
 def cmd_inspect(args) -> int:
@@ -503,8 +505,9 @@ def cmd_inspect(args) -> int:
 
     subs_streams = subtitle_streams(streams)
     console.print(f"\n[bold cyan]Embedded subtitle tracks ({len(subs_streams)})[/bold cyan]")
+    from cleancut.probe import TEXT_SUBTITLE_CODECS
     for i, s in enumerate(subs_streams):
-        kind = "TEXT" if s.codec_name in {"subrip", "srt", "mov_text", "ass", "ssa", "webvtt"} else "image"
+        kind = "TEXT" if s.codec_name in TEXT_SUBTITLE_CODECS else "image"
         console.print(f"  sub:{i}    index={s.index}  lang={s.language}  {s.codec_name} [{kind}]  {s.title}")
     embedded = pick_embedded_subtitle(streams, prefer_language=args.prefer_language)
     if embedded:
@@ -539,7 +542,7 @@ def cmd_inspect(args) -> int:
     return 0
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="cleancut", description="Auto-edit movies for content.")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -585,7 +588,11 @@ def main(argv: list[str] | None = None) -> int:
                        help="Also review pure-violence cuts (off by default — fights kept).")
     p_rev.set_defaults(func=cmd_review)
 
-    args = parser.parse_args(argv)
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
     try:
         return args.func(args)
     except KeyboardInterrupt:
