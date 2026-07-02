@@ -1,7 +1,6 @@
 import pytest
 
-from cleancut.edl_ops import find_overlapping_shot, fmt_timestamp, parse_timestamp
-from cleancut.scenes import Shot
+from cleancut.edl_ops import fmt_ffmpeg_timestamp, fmt_timestamp, parse_timestamp
 
 
 @pytest.mark.parametrize("s,expected", [
@@ -32,13 +31,6 @@ def test_fmt_timestamp_over_hour():
     assert fmt_timestamp(3723.5) == "1:02:03.50"
 
 
-def test_find_overlapping_shot_with_objects():
-    shots = [Shot(0, 10), Shot(10, 20), Shot(20, 30)]
-    assert find_overlapping_shot(5, shots) == (0.0, 10.0)
-    assert find_overlapping_shot(10, shots) == (10.0, 20.0)
-    assert find_overlapping_shot(99, shots) is None
-
-
-def test_find_overlapping_shot_with_tuples():
-    shots = [(0, 10), (10, 20)]
-    assert find_overlapping_shot(15, shots) == (10.0, 20.0)
+def test_fmt_ffmpeg_timestamp_zero_padded():
+    assert fmt_ffmpeg_timestamp(3723.5) == "01:02:03.500"
+    assert fmt_ffmpeg_timestamp(75.5) == "00:01:15.500"

@@ -24,10 +24,16 @@ from cleancut.constants import (
     DEFAULT_VLM_CONFIDENCE,
     DEFAULT_VLM_GAPS_RADIUS,
     DEFAULT_VLM_MIN_SHOT_DURATION,
+    MAX_CONSECUTIVE_LLM_FAILURES,
     MAX_REASON_LENGTH,
 )
 from cleancut.edl import EditDecision, EditDecisionList
-from cleancut.llm_utils import make_ollama_client, strip_to_json
+from cleancut.llm_utils import (
+    coerce_confidence,
+    make_ollama_client,
+    preflight_ollama,
+    strip_to_json,
+)
 from cleancut.scenes import Shot
 from cleancut.subtitles import Subtitle
 
@@ -130,11 +136,10 @@ def _extract_frame(video: Path, t: float, tmp_dir: Path) -> Path | None:
     """Extract a single frame at time `t` (seconds) to a JPEG. Returns path or None."""
     if not shutil.which("ffmpeg"):
         raise RuntimeError("ffmpeg not found on PATH.")
+    from cleancut.edl_ops import fmt_ffmpeg_timestamp
+
     out = tmp_dir / f"frame_{int(t * 1000)}.jpg"
-    h = int(t // 3600)
-    m = int((t % 3600) // 60)
-    s = t - h * 3600 - m * 60
-    timestamp = f"{h:02d}:{m:02d}:{s:06.3f}"
+    timestamp = fmt_ffmpeg_timestamp(t)
     try:
         subprocess.run(
             [
@@ -176,7 +181,7 @@ def _flagged_categories(result: dict, params: VLMParams) -> list[str]:
     cats: list[str] = []
     if not result:
         return cats
-    if float(result.get("confidence", 0.0)) < params.min_confidence:
+    if coerce_confidence(result.get("confidence", 0.0)) < params.min_confidence:
         return cats
     mapping = {
         "explicit": "nudity",
@@ -196,6 +201,7 @@ def scan_with_vlm(
     subs: list[Subtitle],
     existing_edl: EditDecisionList,
     params: VLMParams,
+    use_cache: bool = True,
 ) -> EditDecisionList:
     """Run VLM over a selected subset of shots; emit cuts for flagged shots."""
     try:
@@ -210,14 +216,30 @@ def scan_with_vlm(
     if not targets:
         return EditDecisionList()
 
+    # The target list already encodes mode/stride/gaps selection, so it (plus
+    # scoring params) fully keys the result. LLaVA runs seconds per frame —
+    # cache like the other detectors.
+    cache_hash = None
+    if use_cache:
+        from cleancut import cache as _cache
+        cache_hash = _cache.config_hash(
+            model=params.model,
+            min_confidence=params.min_confidence,
+            cut_on=sorted(params.cut_on),
+            targets=[(round(s.start, 2), round(s.end, 2)) for s in targets],
+        )
+        hit = _cache.load(video, "vlm", cache_hash)
+        if hit is not None:
+            return EditDecisionList(
+                decisions=[EditDecision(**d) for d in hit.get("decisions", [])]
+            )
+
     client = make_ollama_client(params.ollama_host)
-    # Warm-load the model.
-    try:
-        client.generate(model=params.model, prompt="ok", options={"num_predict": 1})
-    except Exception:
-        pass
+    # Warm-load the model — fails loudly if the server or model is unusable.
+    preflight_ollama(client, params.model)
 
     edl = EditDecisionList()
+    consecutive_failures = 0
     with tempfile.TemporaryDirectory(prefix="cleancut_vlm_") as tmp:
         tmp_dir = Path(tmp)
         for shot in tqdm(targets, desc=f"VLM scan ({params.mode})", unit="shot", leave=False):
@@ -226,6 +248,14 @@ def scan_with_vlm(
             if frame is None:
                 continue
             result = _classify_frame(client, params, frame)
+            if result is None:
+                consecutive_failures += 1
+                if consecutive_failures >= MAX_CONSECUTIVE_LLM_FAILURES:
+                    raise RuntimeError(
+                        f"{consecutive_failures} consecutive Ollama failures — aborting VLM scan."
+                    )
+                continue
+            consecutive_failures = 0
             cats = _flagged_categories(result, params)
             if not cats:
                 continue
@@ -242,4 +272,11 @@ def scan_with_vlm(
                 )
             )
 
+    if cache_hash is not None:
+        from dataclasses import asdict
+
+        from cleancut import cache as _cache
+        _cache.save(video, "vlm", cache_hash, {
+            "decisions": [asdict(d) for d in edl.decisions],
+        })
     return edl

@@ -13,12 +13,22 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from pathlib import Path
 
 from tqdm import tqdm
 
-from cleancut.constants import DEFAULT_LLM_CONFIDENCE, MAX_REASON_LENGTH
+from cleancut.constants import (
+    DEFAULT_LLM_CONFIDENCE,
+    MAX_CONSECUTIVE_LLM_FAILURES,
+    MAX_REASON_LENGTH,
+)
 from cleancut.edl import EditDecision, EditDecisionList
-from cleancut.llm_utils import make_ollama_client, strip_to_json
+from cleancut.llm_utils import (
+    coerce_confidence,
+    make_ollama_client,
+    preflight_ollama,
+    strip_to_json,
+)
 from cleancut.subtitles import Subtitle
 
 
@@ -139,8 +149,17 @@ def _classify_one(client, params: LLMParams, chunk: DialogueChunk) -> dict | Non
         return None
 
 
-def classify_dialogue(subs: list[Subtitle], params: LLMParams) -> EditDecisionList:
-    """Classify every dialogue chunk; emit cut decisions for flagged scenes."""
+def classify_dialogue(
+    subs: list[Subtitle],
+    params: LLMParams,
+    video: Path | None = None,
+    use_cache: bool = True,
+) -> EditDecisionList:
+    """Classify every dialogue chunk; emit cut decisions for flagged scenes.
+
+    Results cache per (video, model, params, chunk fingerprint) when `video`
+    is given — at seconds per chunk, this is one of the slowest stages.
+    """
     try:
         import ollama  # noqa: F401
     except ImportError as e:
@@ -153,22 +172,42 @@ def classify_dialogue(subs: list[Subtitle], params: LLMParams) -> EditDecisionLi
     if not chunks:
         return EditDecisionList()
 
+    cache_hash = None
+    if use_cache and video is not None:
+        from cleancut import cache as _cache
+        cache_hash = _cache.config_hash(
+            model=params.model,
+            min_confidence=params.min_confidence,
+            pad_seconds=params.pad_seconds,
+            chunks=[(round(c.start, 2), round(c.end, 2), len(c.lines),
+                     sum(len(s.text) for s in c.lines)) for c in chunks],
+        )
+        hit = _cache.load(video, "llm_dialogue", cache_hash)
+        if hit is not None:
+            return EditDecisionList(
+                decisions=[EditDecision(**d) for d in hit.get("decisions", [])]
+            )
+
     client = make_ollama_client(params.ollama_host)
 
-    # Warm-load the model so first-chunk latency doesn't break the tqdm ETA.
-    try:
-        client.generate(model=params.model, prompt="ok", options={"num_predict": 1})
-    except Exception:
-        pass
+    # Warm-load the model — fails loudly if the server or model is unusable.
+    preflight_ollama(client, params.model)
 
     edl = EditDecisionList()
+    consecutive_failures = 0
     for chunk in tqdm(chunks, desc="LLM dialogue scan", unit="chunk", leave=False):
         result = _classify_one(client, params, chunk)
         if not result:
+            consecutive_failures += 1
+            if consecutive_failures >= MAX_CONSECUTIVE_LLM_FAILURES:
+                raise RuntimeError(
+                    f"{consecutive_failures} consecutive Ollama failures — aborting LLM scan."
+                )
             continue
+        consecutive_failures = 0
         if not result.get("should_cut"):
             continue
-        confidence = float(result.get("confidence", 0.0))
+        confidence = coerce_confidence(result.get("confidence", 0.0))
         if confidence < params.min_confidence:
             continue
         category = str(result.get("category", "multi"))
@@ -182,10 +221,17 @@ def classify_dialogue(subs: list[Subtitle], params: LLMParams) -> EditDecisionLi
                 start=max(0.0, chunk.start - params.pad_seconds),
                 end=chunk.end + params.pad_seconds,
                 action="cut",
-                category=category if category != "multi" else "sex+drugs",
+                category=category,
                 reason=f"LLM ({params.model}): {result.get('reasoning', '')[:MAX_REASON_LENGTH]}",
                 source="llm-dialogue",
             )
         )
 
+    if cache_hash is not None:
+        from dataclasses import asdict
+
+        from cleancut import cache as _cache
+        _cache.save(video, "llm_dialogue", cache_hash, {
+            "decisions": [asdict(d) for d in edl.decisions],
+        })
     return edl

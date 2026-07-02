@@ -70,24 +70,39 @@ def _extract_full_audio_to_wav(video: Path, audio_track_index: int | None) -> Pa
     import tempfile
     if not shutil.which("ffmpeg"):
         raise RuntimeError("ffmpeg not found on PATH.")
-    out = Path(tempfile.mkstemp(prefix="cleancut_ae_", suffix=".wav")[1])
+    fd, out_name = tempfile.mkstemp(prefix="cleancut_ae_", suffix=".wav")
+    import os
+    os.close(fd)
+    out = Path(out_name)
     map_arg = ["-map", f"0:{audio_track_index}"] if audio_track_index is not None else []
-    subprocess.run(
-        [
-            "ffmpeg", "-y", "-v", "error",
-            "-i", str(video),
-            *map_arg,
-            "-ac", "1", "-ar", "16000",
-            "-acodec", "pcm_s16le",
-            str(out),
-        ],
-        check=True,
-    )
+    try:
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-v", "error",
+                "-i", str(video),
+                *map_arg,
+                "-ac", "1", "-ar", "16000",
+                "-acodec", "pcm_s16le",
+                str(out),
+            ],
+            check=True,
+        )
+    except subprocess.CalledProcessError as e:
+        out.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"Audio extraction failed (no audio track?): {e}"
+        ) from e
     return out
 
 
 def _load_audio(wav_path: Path):
-    import librosa  # type: ignore
+    try:
+        import librosa  # type: ignore
+    except ImportError as e:
+        raise RuntimeError(
+            "Audio event detection requires extras. "
+            "Install with: pip install 'cleancut[audio]'"
+        ) from e
     audio, sr = librosa.load(str(wav_path), sr=16000, mono=True)
     return audio, sr
 
@@ -115,7 +130,7 @@ def _load_model(model_name: str):
     except ImportError as e:
         raise RuntimeError(
             "Audio event detection requires extras. "
-            "Install with: pip install transformers librosa"
+            "Install with: pip install 'cleancut[audio]'"
         ) from e
 
     extractor = ASTFeatureExtractor.from_pretrained(model_name)
@@ -127,16 +142,27 @@ def _load_model(model_name: str):
     return extractor, model, device
 
 
-def _classify_clip(extractor, model, device, clip: np.ndarray) -> list[tuple[str, float]]:
+# Clips per forward pass. AST and its feature extractor both take batches;
+# one-clip-at-a-time wastes most of the accelerator.
+AST_BATCH_SIZE = 16
+
+
+def _classify_clips(
+    extractor, model, device, clips: list[np.ndarray],
+) -> list[list[tuple[str, float]]]:
+    """Classify a batch of clips; returns per-clip (label, score) lists."""
     import torch
-    inputs = extractor(clip, sampling_rate=16000, return_tensors="pt")
+    inputs = extractor(clips, sampling_rate=16000, return_tensors="pt")
     inputs = {k: v.to(device) for k, v in inputs.items()}
     with torch.no_grad():
         logits = model(**inputs).logits
     # Sigmoid over multi-label outputs (each class independent).
-    probs = torch.sigmoid(logits)[0].cpu().numpy()
+    probs = torch.sigmoid(logits).cpu().numpy()
     id2label = model.config.id2label
-    return [(id2label[i], float(probs[i])) for i in range(len(probs))]
+    return [
+        [(id2label[i], float(row[i])) for i in range(len(row))]
+        for row in probs
+    ]
 
 
 def scan_audio_events(
@@ -186,29 +212,33 @@ def scan_audio_events(
                 label_to_category[label] = cat
         target_labels = set(label_to_category.keys())
 
-        for shot in tqdm(shots, desc="Audio events", unit="shot", leave=False):
-            if shot.duration < params.min_shot_duration:
-                continue
-            center = shot.start + shot.duration / 2.0
-            clip = _slice_audio(audio, sr, center, params.clip_seconds)
-            results = _classify_clip(extractor, model, device, clip)
-            hits = [(lbl, score) for lbl, score in results
-                    if lbl in target_labels and score >= params.threshold]
-            if not hits:
-                continue
-            hits.sort(key=lambda x: -x[1])
-            cats = sorted({label_to_category[lbl] for lbl, _ in hits})
-            top = hits[0]
-            edl.add(
-                EditDecision(
-                    start=shot.start,
-                    end=shot.end,
-                    action="cut",
-                    category="+".join(cats),
-                    reason=f"audio event: {top[0]} ({top[1]:.2f})",
-                    source="audio",
+        eligible = [s for s in shots if s.duration >= params.min_shot_duration]
+        for batch_start in tqdm(range(0, len(eligible), AST_BATCH_SIZE),
+                                desc="Audio events", unit="batch", leave=False):
+            batch = eligible[batch_start:batch_start + AST_BATCH_SIZE]
+            clips = [
+                _slice_audio(audio, sr, s.start + s.duration / 2.0, params.clip_seconds)
+                for s in batch
+            ]
+            batch_results = _classify_clips(extractor, model, device, clips)
+            for shot, results in zip(batch, batch_results):
+                hits = [(lbl, score) for lbl, score in results
+                        if lbl in target_labels and score >= params.threshold]
+                if not hits:
+                    continue
+                hits.sort(key=lambda x: -x[1])
+                cats = sorted({label_to_category[lbl] for lbl, _ in hits})
+                top = hits[0]
+                edl.add(
+                    EditDecision(
+                        start=shot.start,
+                        end=shot.end,
+                        action="cut",
+                        category="+".join(cats),
+                        reason=f"audio event: {top[0]} ({top[1]:.2f})",
+                        source="audio",
+                    )
                 )
-            )
     finally:
         wav.unlink(missing_ok=True)
 
