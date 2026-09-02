@@ -225,7 +225,8 @@ Options:
 | `--no-visual` | Skip NudeNet + VLM |
 | `--no-llm` | Skip Ollama dialogue classification |
 | `--no-audio` | Skip HuggingFace audio events |
-| `--language CODE` | Prefer this language track (`eng`, `spa`, …) |
+| `--prefer-language CODE` | Prefer this language for sidecar subs and audio track (`eng`, `spa`, …; default `eng`) |
+| `--whisper-language CODE` | Force Whisper's language hint (e.g. `en`) instead of auto-detect |
 | `-o FILE` | Write EDL to this path (default: alongside video) |
 
 ---
@@ -360,7 +361,7 @@ cleancut clean FILE --disable-category nudity
 cleancut clean FILE --audio-track 1
 
 # Prefer Spanish audio/subtitles
-cleancut clean FILE --language spa
+cleancut clean FILE --prefer-language spa
 ```
 
 ---
