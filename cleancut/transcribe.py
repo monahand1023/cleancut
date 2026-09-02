@@ -6,7 +6,11 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from rich.console import Console
+
 from cleancut.subtitles import Subtitle
+
+console = Console()
 
 
 @dataclass
@@ -45,10 +49,10 @@ def _resolve_device(requested: str | None, word_timestamps: bool) -> str:
     if requested is None:
         return _autodetect_device(word_timestamps=word_timestamps)
     if requested == "mps" and word_timestamps:
-        print(
-            "[cleancut] WARNING: MPS does not support Whisper's word-timestamp "
-            "float64 ops — falling back to CPU. Disable word timestamps with "
-            "--no-word-timestamps to use MPS."
+        console.print(
+            "[yellow]MPS does not support Whisper's word-timestamp float64 ops — "
+            "falling back to CPU. Disable word timestamps with --no-word-timestamps "
+            "to use MPS.[/yellow]"
         )
         return "cpu"
     return requested
